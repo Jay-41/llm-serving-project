@@ -1,0 +1,6 @@
+# Real-model dependencies. NOT needed until Phase 6 -- the mock backend runs
+# Phases 1-5 without them. Install into the same venv when you get GPU access:
+#   pip install -r requirements-model.txt
+torch>=2.2
+transformers>=4.40
+accelerate>=0.29

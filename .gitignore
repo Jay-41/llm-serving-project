@@ -1,0 +1,8 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Hugging Face model cache, if it lands in-tree
+.cache/

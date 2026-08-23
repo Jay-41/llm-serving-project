@@ -1,0 +1,5 @@
+# Core serving + load testing. Enough for Phases 1-5 (mock backend, CPU only).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+httpx>=0.26
