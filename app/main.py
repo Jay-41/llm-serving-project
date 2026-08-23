@@ -1,15 +1,18 @@
-"""Phase 1: baseline single-request serving. No queue, no batching.
+"""Phase 2: request queue + dynamic batching scheduler.
 
-Every request runs inference directly, and inference is dispatched to a thread
-pool with exactly ONE worker. That single worker is the whole point of this
-phase: one model instance cannot serve two requests at once, so under
-concurrency requests pile up waiting their turn, latency grows linearly with
-concurrency, and throughput flatlines at 1 / service_time.
+The handler no longer runs inference. It hands the request to a queue and
+awaits a Future; one background scheduler task drains that queue, groups
+requests into batches, and runs a single forward pass per batch.
 
-Those are the "before" numbers Phase 2 has to beat.
+Inference still executes on a ThreadPoolExecutor with max_workers=1, exactly
+as in Phase 1 -- one model instance, one forward pass at a time. Nothing about
+the hardware constraint changed. The only thing that changed is how much
+useful work each of those serialised passes carries.
+
+Set MAX_BATCH_SIZE=1 to reproduce the Phase 1 baseline through this same code
+path, which is how the before/after comparison is kept honest.
 """
 
-import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -18,6 +21,8 @@ from fastapi import FastAPI, HTTPException
 
 from app.backends import build_backend
 from app.config import get_settings
+from app.metrics import MetricsLogger
+from app.scheduler import BatchingScheduler
 from app.schemas import GenerateRequest, GenerateResponse, HealthResponse
 
 
@@ -30,44 +35,59 @@ async def lifespan(app: FastAPI):
     backend.load()
     load_ms = (time.perf_counter() - started) * 1000.0
 
-    # max_workers=1 is deliberate and load-bearing. Raising it would not make a
-    # single model instance parallel -- it would just oversubscribe it and hide
-    # the queueing behind thread scheduling. Phase 2 replaces this implicit
-    # one-at-a-time bottleneck with an explicit asyncio.Queue plus a batching
-    # scheduler, which is where the throughput win comes from.
+    # Still one worker: a single model instance cannot run two forward passes
+    # concurrently. Batching does not change that -- it makes each pass do
+    # more work rather than making passes overlap.
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference")
+    metrics = MetricsLogger(settings.metrics_path)
+    scheduler = BatchingScheduler(backend, settings, executor, metrics)
+    scheduler.start()
 
     app.state.settings = settings
     app.state.backend = backend
     app.state.executor = executor
+    app.state.metrics = metrics
+    app.state.scheduler = scheduler
 
     print(
-        f"[startup] backend={backend.name} loaded in {load_ms:.0f}ms "
-        f"| default_max_tokens={settings.default_max_tokens}"
+        f"[startup] backend={backend.name} loaded in {load_ms:.0f}ms | "
+        f"max_batch_size={settings.max_batch_size} "
+        f"max_wait_ms={settings.max_wait_ms} | metrics={metrics.path}"
     )
     try:
         yield
     finally:
+        await scheduler.stop()
         executor.shutdown(wait=True)
+        metrics.close()
 
 
-app = FastAPI(title="LLM Serving Layer - Phase 1 baseline", lifespan=lifespan)
+app = FastAPI(title="LLM Serving Layer - Phase 2 batching", lifespan=lifespan)
 
 
 @app.get("/healthz", response_model=HealthResponse)
 async def healthz() -> HealthResponse:
     settings = app.state.settings
+    scheduler = app.state.scheduler
+    dispatched = scheduler.batches_dispatched
     return HealthResponse(
         status="ok",
         backend=app.state.backend.name,
         default_max_tokens=settings.default_max_tokens,
+        max_batch_size=settings.max_batch_size,
+        max_wait_ms=settings.max_wait_ms,
+        queue_depth=scheduler.queue_depth,
+        batches_dispatched=dispatched,
+        requests_served=scheduler.requests_served,
+        mean_batch_size=(
+            scheduler.requests_served / dispatched if dispatched else 0.0
+        ),
     )
 
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest) -> GenerateResponse:
     settings = app.state.settings
-    backend = app.state.backend
 
     max_tokens = req.max_tokens or settings.default_max_tokens
     if max_tokens > settings.max_allowed_tokens:
@@ -76,27 +96,5 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
             detail=f"max_tokens must be <= {settings.max_allowed_tokens}",
         )
 
-    received = time.perf_counter()
-    marks = {}
-
-    def run_inference() -> str:
-        # Runs on the single inference thread. The gap between `received` and
-        # `marks["started"]` is time spent waiting for that thread to be free,
-        # i.e. the queueing this phase does nothing about.
-        marks["started"] = time.perf_counter()
-        try:
-            return backend.generate(req.prompt, max_tokens)
-        finally:
-            marks["finished"] = time.perf_counter()
-
-    loop = asyncio.get_running_loop()
-    text = await loop.run_in_executor(app.state.executor, run_inference)
-
-    return GenerateResponse(
-        text=text,
-        backend=backend.name,
-        max_tokens=max_tokens,
-        wait_ms=(marks["started"] - received) * 1000.0,
-        inference_ms=(marks["finished"] - marks["started"]) * 1000.0,
-        total_ms=(time.perf_counter() - received) * 1000.0,
-    )
+    result = await app.state.scheduler.submit(req.prompt, max_tokens)
+    return GenerateResponse(backend=app.state.backend.name, **result)

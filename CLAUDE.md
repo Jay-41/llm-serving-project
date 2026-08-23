@@ -27,7 +27,7 @@ A scoped, production-flavored LLM serving system: request queueing, dynamic batc
 Update this section as work progresses. Mark each phase `todo` / `in progress` / `done`, and note the key verified metric once done.
 
 - [x] Phase 1 — `done`. Baseline single-request FastAPI endpoint (no batching). **Verified:** throughput flat at **1.80 rps** across concurrency 1→16 (mock backend, 64 tok/req, ~555ms service time); p50 latency grows linearly 559ms → 8878ms; inference time constant at ~555ms while queue wait absorbs all growth (6658ms mean wait at conc 16). Data: `bench/results/phase1_baseline*.csv`.  
-- [ ] Phase 2 — Request queue \+ dynamic batching scheduler \+ basic logging, on the CPU mock. Metric: throughput/latency delta vs. Phase 1 baseline at the same concurrency levels.  
+- [x] Phase 2 — `done`. Request queue + dynamic batching scheduler + per-request JSONL logging, on the CPU mock. **Verified:** **5.25x peak throughput** (1.80 → 9.44 rps at concurrency 16) and **p50 latency 8892ms → 1680ms**. Gains by concurrency: 2→1.82x, 4→3.18x, 8→5.13x, 16→5.25x. Honest cost: at concurrency 1 batching is 0.98x throughput / +10ms latency (the `MAX_WAIT_MS` deadline). Baseline re-measured on the same code via `MAX_BATCH_SIZE=1` as a control, reproducing Phase 1 within noise. Batch cost model: `MOCK_BATCH_ALPHA=0.08` (bandwidth-bound decode) — recalibrate in Phase 6. Data: `bench/results/phase2_*`, `logs/phase2_batching.jsonl`.  
 - [ ] Phase 3 (stretch) — Token streaming via SSE.  
 - [ ] Phase 4 — Backpressure / admission control under simulated burst load. Metric: confirm graceful rejection instead of latency collapse under overload.  
 - [ ] Phase 5 (stretch) — Priority tiers (premium vs. free scheduling).  

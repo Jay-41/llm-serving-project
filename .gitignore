@@ -6,3 +6,7 @@ __pycache__/
 
 # Hugging Face model cache, if it lands in-tree
 .cache/
+
+# Default ad-hoc metrics sink. Named benchmark logs under logs/ are kept as
+# evidence and committed explicitly.
+logs/requests.jsonl

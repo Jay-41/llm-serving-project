@@ -41,10 +41,10 @@ def percentile(values: List[float], q: float) -> float:
 
 class Result:
     __slots__ = ("concurrency", "worker", "index", "status", "latency_ms",
-                 "wait_ms", "inference_ms")
+                 "wait_ms", "inference_ms", "batch_size")
 
     def __init__(self, concurrency, worker, index, status, latency_ms,
-                 wait_ms, inference_ms):
+                 wait_ms, inference_ms, batch_size):
         self.concurrency = concurrency
         self.worker = worker
         self.index = index
@@ -52,6 +52,7 @@ class Result:
         self.latency_ms = latency_ms
         self.wait_ms = wait_ms
         self.inference_ms = inference_ms
+        self.batch_size = batch_size
 
 
 async def worker_loop(
@@ -76,19 +77,20 @@ async def worker_loop(
             response = await client.post(url, json=payload)
             latency_ms = (time.perf_counter() - started) * 1000.0
             status = response.status_code
-            wait_ms = inference_ms = float("nan")
+            wait_ms = inference_ms = batch_size = float("nan")
             if status == 200:
                 body = response.json()
-                wait_ms = body.get("wait_ms", float("nan"))
+                wait_ms = body.get("queue_wait_ms", float("nan"))
                 inference_ms = body.get("inference_ms", float("nan"))
+                batch_size = body.get("batch_size", float("nan"))
         except Exception as exc:  # network error, timeout, refused connection
             latency_ms = (time.perf_counter() - started) * 1000.0
             status = f"error:{type(exc).__name__}"
-            wait_ms = inference_ms = float("nan")
+            wait_ms = inference_ms = batch_size = float("nan")
 
         results.append(
             Result(concurrency, worker_id, index, status, latency_ms,
-                   wait_ms, inference_ms)
+                   wait_ms, inference_ms, batch_size)
         )
         index += 1
 
@@ -125,6 +127,7 @@ async def run_level(
     latencies = [r.latency_ms for r in ok]
     waits = [r.wait_ms for r in ok if r.wait_ms == r.wait_ms]  # drop NaN
     infers = [r.inference_ms for r in ok if r.inference_ms == r.inference_ms]
+    batches = [r.batch_size for r in ok if r.batch_size == r.batch_size]
 
     return {
         "concurrency": concurrency,
@@ -140,6 +143,7 @@ async def run_level(
         "max_ms": max(latencies) if latencies else float("nan"),
         "mean_wait_ms": statistics.fmean(waits) if waits else float("nan"),
         "mean_inference_ms": statistics.fmean(infers) if infers else float("nan"),
+        "mean_batch_size": statistics.fmean(batches) if batches else float("nan"),
         "_rows": results,
     }
 
@@ -149,7 +153,7 @@ def print_summary(summaries: List[Dict], label: str) -> None:
     print(f"=== {label} ===")
     header = (
         f"{'conc':>5} {'ok':>5} {'fail':>5} {'rps':>8} {'mean':>9} "
-        f"{'p50':>9} {'p95':>9} {'p99':>9} {'wait':>9} {'infer':>9}"
+        f"{'p50':>9} {'p95':>9} {'p99':>9} {'wait':>9} {'infer':>9} {'batch':>7}"
     )
     print(header)
     print("-" * len(header))
@@ -158,12 +162,14 @@ def print_summary(summaries: List[Dict], label: str) -> None:
             f"{s['concurrency']:>5} {s['ok']:>5} {s['failed']:>5} "
             f"{s['throughput_rps']:>8.2f} {s['mean_ms']:>9.1f} "
             f"{s['p50_ms']:>9.1f} {s['p95_ms']:>9.1f} {s['p99_ms']:>9.1f} "
-            f"{s['mean_wait_ms']:>9.1f} {s['mean_inference_ms']:>9.1f}"
+            f"{s['mean_wait_ms']:>9.1f} {s['mean_inference_ms']:>9.1f} "
+            f"{s['mean_batch_size']:>7.2f}"
         )
     print()
     print("rps = completed requests / wall clock. Latency columns are ms, "
           "measured client-side.")
     print("wait/infer are server-reported: queueing delay vs. time in the model.")
+    print("batch = mean number of requests sharing a forward pass.")
 
 
 def write_csv(path: str, summaries: List[Dict]) -> None:
@@ -175,14 +181,14 @@ def write_csv(path: str, summaries: List[Dict]) -> None:
         writer = csv.writer(handle)
         writer.writerow(
             ["concurrency", "worker", "index", "status", "latency_ms",
-             "wait_ms", "inference_ms"]
+             "wait_ms", "inference_ms", "batch_size"]
         )
         for summary in summaries:
             for row in summary["_rows"]:
                 writer.writerow(
                     [row.concurrency, row.worker, row.index, row.status,
                      f"{row.latency_ms:.3f}", f"{row.wait_ms:.3f}",
-                     f"{row.inference_ms:.3f}"]
+                     f"{row.inference_ms:.3f}", f"{row.batch_size:.2f}"]
                 )
 
     summary_path = path.replace(".csv", "_summary.csv")
@@ -190,7 +196,8 @@ def write_csv(path: str, summaries: List[Dict]) -> None:
         writer = csv.writer(handle)
         keys = ["concurrency", "requests", "ok", "failed", "wall_s",
                 "throughput_rps", "mean_ms", "p50_ms", "p95_ms", "p99_ms",
-                "max_ms", "mean_wait_ms", "mean_inference_ms"]
+                "max_ms", "mean_wait_ms", "mean_inference_ms",
+                "mean_batch_size"]
         writer.writerow(keys)
         for summary in summaries:
             writer.writerow([summary[k] for k in keys])

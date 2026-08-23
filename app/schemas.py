@@ -17,19 +17,28 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
     text: str
     backend: str
+    request_id: int
     max_tokens: int
 
-    # Per-request timings, in milliseconds. Phase 1 reports these so the
-    # baseline's cost can be split into "waiting for the model to be free"
-    # versus "actually generating" -- the same split Phase 2 has to improve.
-    wait_ms: float = Field(
-        ..., description="Handler entry until inference actually started."
-    )
-    inference_ms: float = Field(..., description="Time inside backend.generate().")
-    total_ms: float = Field(..., description="Handler entry until response built.")
+    # How many requests shared this request's forward pass. This is the number
+    # that has to rise with load for batching to be doing anything.
+    batch_size: int
+    queue_depth_at_enqueue: int
+
+    # Timings in milliseconds. The split matters: batching should shrink
+    # queue_wait_ms dramatically while barely moving inference_ms.
+    queue_wait_ms: float = Field(..., description="Enqueue until a batch took it.")
+    inference_ms: float = Field(..., description="Cost of the batched forward pass.")
+    e2e_ms: float = Field(..., description="Enqueue until the response was ready.")
 
 
 class HealthResponse(BaseModel):
     status: str
     backend: str
     default_max_tokens: int
+    max_batch_size: int
+    max_wait_ms: float
+    queue_depth: int
+    batches_dispatched: int
+    requests_served: int
+    mean_batch_size: float

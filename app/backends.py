@@ -20,6 +20,7 @@ thread reproduces the actual constraint.
 
 import random
 import time
+from typing import List
 
 try:  # Python 3.8+
     from typing import Protocol
@@ -38,8 +39,13 @@ class Backend(Protocol):
         """Do any expensive setup. Called once, at startup."""
         ...
 
-    def generate(self, prompt: str, max_tokens: int) -> str:
-        """Blocking. Returns the completion for a single prompt."""
+    def generate_batch(self, prompts: List[str], max_tokens: int) -> List[str]:
+        """Blocking. Completes every prompt in one forward pass.
+
+        Returns one completion per prompt, in the same order. A single prompt
+        is just a batch of one, so this is the only entry point the serving
+        layer needs.
+        """
         ...
 
 
@@ -59,23 +65,35 @@ class MockBackend:
         self._base_ms = settings.mock_base_ms
         self._per_token_ms = settings.mock_per_token_ms
         self._jitter_ms = settings.mock_jitter_ms
+        self._batch_alpha = settings.mock_batch_alpha
         self._rng = random.Random(0xC0FFEE)
 
     def load(self) -> None:
         # Nothing to load. Defined so the interface matches the real backend.
         return None
 
-    def sleep_ms_for(self, max_tokens: int) -> float:
-        """The modelled service time, exposed so tests and Phase 2 can reason
-        about expected latency without re-deriving the formula."""
-        planned = self._base_ms + self._per_token_ms * max_tokens
+    def sleep_ms_for(self, batch_size: int, max_tokens: int) -> float:
+        """The modelled service time for one batched forward pass.
+
+        Exposed rather than inlined so the scheduler's expected behaviour can
+        be reasoned about (and tested) without re-deriving the formula.
+        """
+        batch_factor = 1.0 + self._batch_alpha * (batch_size - 1)
+        planned = self._base_ms + self._per_token_ms * max_tokens * batch_factor
         if self._jitter_ms > 0:
             planned += self._rng.uniform(-self._jitter_ms, self._jitter_ms)
         return max(0.0, planned)
 
-    def generate(self, prompt: str, max_tokens: int) -> str:
-        time.sleep(self.sleep_ms_for(max_tokens) / 1000.0)
-        return f"[mock completion for {len(prompt)}-char prompt, {max_tokens} tokens]"
+    def generate_batch(self, prompts: List[str], max_tokens: int) -> List[str]:
+        # One sleep for the whole batch -- that IS the batching win. Every
+        # sequence in a real batch advances together, one decode step at a
+        # time, so the batch costs one (slightly inflated) generation, not N.
+        time.sleep(self.sleep_ms_for(len(prompts), max_tokens) / 1000.0)
+        return [
+            f"[mock completion for {len(p)}-char prompt, {max_tokens} tokens, "
+            f"batch={len(prompts)}]"
+            for p in prompts
+        ]
 
 
 class QwenBackend:
@@ -110,6 +128,13 @@ class QwenBackend:
         dtype = None if s.model_dtype == "auto" else getattr(torch, s.model_dtype)
 
         self._tokenizer = AutoTokenizer.from_pretrained(s.model_name)
+        # Decoder-only models must be LEFT-padded for batched generation:
+        # generation continues from the rightmost position, so right-padding
+        # would have the model continue from pad tokens instead of the prompt.
+        self._tokenizer.padding_side = "left"
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+
         self._model = AutoModelForCausalLM.from_pretrained(
             s.model_name,
             torch_dtype=dtype,
@@ -117,28 +142,40 @@ class QwenBackend:
         self._model.eval()
         self._device = device
 
-    def generate(self, prompt: str, max_tokens: int) -> str:
+    def generate_batch(self, prompts: List[str], max_tokens: int) -> List[str]:
         if self._model is None or self._tokenizer is None:
             raise RuntimeError("QwenBackend.load() was not called")
 
         import torch
 
-        messages = [{"role": "user", "content": prompt}]
-        text = self._tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self._tokenizer([text], return_tensors="pt").to(self._device)
+        texts = [
+            self._tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for prompt in prompts
+        ]
+        inputs = self._tokenizer(
+            texts, return_tensors="pt", padding=True
+        ).to(self._device)
 
         with torch.no_grad():
             output_ids = self._model.generate(
                 **inputs,
                 max_new_tokens=max_tokens,
                 do_sample=False,
+                pad_token_id=self._tokenizer.pad_token_id,
             )
 
-        # Strip the prompt tokens; keep only what was newly generated.
-        generated = output_ids[0][inputs["input_ids"].shape[1] :]
-        return self._tokenizer.decode(generated, skip_special_tokens=True)
+        # Strip the prompt tokens; keep only what was newly generated. With
+        # left padding every row's prompt ends at the same column, so one
+        # offset works for the whole batch.
+        prompt_len = inputs["input_ids"].shape[1]
+        return [
+            self._tokenizer.decode(row[prompt_len:], skip_special_tokens=True)
+            for row in output_ids
+        ]
 
 
 def build_backend(settings: Settings) -> Backend:
