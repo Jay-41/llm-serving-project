@@ -298,6 +298,116 @@ timed out and burned a GPU pass on an answer nobody will read.
 214 unprotected and never exceeds 15 protected, with every rejection recorded as
 its own `"event": "rejected"` record.
 
+## Phase 4.1: observability — Prometheus + Grafana
+
+Everything measured so far was reconstructed after the fact from CSVs and JSONL.
+Phase 4.1 makes the same results readable **live, from scrapes**, before the GPU
+work — so Phase 6 produces real dashboard graphs instead of static charts
+rebuilt afterward.
+
+### Two layers, not one
+
+`app/metrics.py` (JSONL) and `app/telemetry.py` (Prometheus) are not redundant:
+
+| | Answers | Keeps |
+| --- | --- | --- |
+| **JSONL** | "what happened to request #4182?" | per-request identity |
+| **Prometheus** | "what is p99 doing right now?" | aggregate trend |
+
+Prometheus cannot reconstruct the first — histograms discard identity. The JSONL
+cannot cheaply answer the second over a live window. Working rule #2 depends on
+the former; the dashboards depend on the latter.
+
+### What is exported
+
+Nine metrics, at `/metrics`. The only label anywhere is `outcome`
+(`served`/`rejected`) with two values — nothing is labelled per-request,
+per-prompt or per-client, which is how a metrics endpoint becomes an outage.
+
+```
+llm_requests_total{outcome}      counter    goodput and shed load
+llm_batches_total                counter    forward passes
+llm_queue_depth                  gauge      live, via scrape-time callback
+llm_queue_depth_peak             gauge      high-water mark (1s scrapes miss spikes)
+llm_queue_depth_limit            gauge      config, so panels draw the limit line
+llm_max_batch_size               gauge      config
+llm_queue_wait_seconds           histogram  1ms … 30s
+llm_inference_seconds            histogram  fine across 0.4–1.0s
+llm_request_duration_seconds     histogram  fine across 2.0–3.0s
+llm_batch_size                   histogram  observed per batch
+```
+
+Bucket edges are chosen against measured ranges, not left at defaults — with
+defaults, nearly every observation lands in one bucket and the quantiles are
+worthless.
+
+### Running it
+
+```bash
+docker network create llm-obs
+docker run -d --name prometheus --network llm-obs -p 9090:9090 \
+  --add-host=host.docker.internal:host-gateway \
+  -v "$(pwd)/ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
+  prom/prometheus --config.file=/etc/prometheus/prometheus.yml
+docker run -d --name grafana --network llm-obs -p 3000:3000 \
+  -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
+  -v "$(pwd)/ops/grafana/provisioning:/etc/grafana/provisioning:ro" \
+  -v "$(pwd)/ops/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
+  grafana/grafana
+```
+
+Dashboard at **http://localhost:3000** — datasource and dashboard are
+auto-provisioned, so this is version-controlled config rather than hand-built UI
+state that dies with the container. Phase 4.2 collapses both commands into one
+`docker compose up`.
+
+### Verification
+
+`ops/verify_dashboards.py` **reads the PromQL out of the dashboard JSON** and
+runs each expression against Prometheus. Because the queries are extracted
+rather than retyped, a passing run proves the panels work — not that some
+parallel set of queries works.
+
+```bash
+python ops/verify_dashboards.py --window 60
+```
+
+Both Phase 4 conditions were re-run under live scraping. The dashboards
+reproduce both:
+
+| Panel query | Protected (limit 16) | Unprotected (limit 0) |
+| --- | ---: | ---: |
+| `llm_queue_depth` max | **16** | **207** |
+| `llm_queue_depth_peak` | **16** | **215** |
+| e2e p50 | 2.30 s | **16.81 s** |
+| e2e p95 | 2.58 s | **28.12 s** |
+| served / rejected totals | 202 / 199 | 401 / 0 |
+| mean batch size | 7.59 | 8.00 |
+
+The Phase 2 result is visible in the same dashboard: `queue wait p50` 1.45s
+against `inference p50` 0.824s — the split that shows the bottleneck is the line,
+not the model.
+
+The `admission limit` series is `llm_queue_depth_limit > 0`, so it *disappears*
+when admission control is off rather than drawing a threshold line that isn't
+being enforced.
+
+### One defect the verification caught
+
+The dashboard initially reported **p99 = 2.93s** where the burst test measured
+**2.53s** — a 16% overstatement. Cause: `histogram_quantile` assumes
+observations spread uniformly within a bucket, and the `le` edges jumped
+2.5 → 3.0, straddling exactly where p99 landed. Since `MAX_QUEUE_DEPTH` is
+*derived* from a 2.5s p99 target, that was the worst possible place to be coarse.
+
+Adding edges at 2.25 and 2.75 cut the error to 7% (2.71s vs 2.54s), with p50
+within 0.4%.
+
+**Buckets belong where the decisions are.** A histogram quantile is an estimate,
+and it is only as good as the resolution near the number you actually act on.
+The tail above 20s stays coarse on purpose — the difference between a 23s and a
+29s p99 changes no decision, since both mean the same thing.
+
 ### A note on making the mock honest
 
 Both backends are blocking functions dispatched to a `ThreadPoolExecutor` with

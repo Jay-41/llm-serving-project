@@ -3,3 +3,6 @@ fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.6
 httpx>=0.26
+
+# Observability (Phase 4.1) — exposes /metrics for Prometheus to scrape.
+prometheus-client>=0.20

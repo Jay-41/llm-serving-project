@@ -1,0 +1,15 @@
+# Auto-provisioned datasource. The URL is the compose service name, which is
+# where this stack lives from Phase 4.2 onward. For a Prometheus running
+# natively on the host instead, override with http://localhost:9090.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 1s

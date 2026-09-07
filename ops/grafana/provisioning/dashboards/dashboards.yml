@@ -1,0 +1,16 @@
+# Loads every dashboard JSON from the mounted directory at startup, so the
+# dashboards are version-controlled artifacts rather than hand-built UI state
+# that dies with the container.
+apiVersion: 1
+
+providers:
+  - name: llm-serving
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

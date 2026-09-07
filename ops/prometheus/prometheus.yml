@@ -1,0 +1,31 @@
+# Prometheus scrape config for the serving layer.
+#
+# scrape_interval is 1s, which is far more aggressive than a production default
+# (15-60s). It is deliberate here: the benchmark runs this project cares about
+# last 20-45 seconds, and at a 15s interval a whole overload episode would be
+# three data points. One target, tiny payload, short runs — the cost is
+# negligible and the resolution is the entire point.
+#
+# Raise this to 15s before deploying anything long-lived (Phase 4.3).
+
+global:
+  scrape_interval: 1s
+  evaluation_interval: 1s
+  external_labels:
+    project: llm-serving
+
+scrape_configs:
+  - job_name: llm-serving
+    metrics_path: /metrics
+    static_configs:
+      # Phase 4.1: Prometheus runs in a container, the app still runs on the
+      # host, so the app is reached through the host gateway. Phase 4.2
+      # containerizes the app too and this becomes the compose service name,
+      # "app:8000".
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          instance: local
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

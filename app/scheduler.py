@@ -25,6 +25,7 @@ import itertools
 import time
 from typing import Any, Dict, List, Optional
 
+from app import telemetry
 from app.backends import Backend
 from app.config import Settings
 from app.metrics import MetricsLogger
@@ -135,6 +136,7 @@ class BatchingScheduler:
         limit = self._settings.max_queue_depth
         if limit > 0 and depth >= limit:
             self.requests_rejected += 1
+            telemetry.REQUESTS.labels(outcome="rejected").inc()
             self._metrics.log(
                 {
                     "event": "rejected",
@@ -148,6 +150,7 @@ class BatchingScheduler:
 
         if depth + 1 > self.peak_queue_depth:
             self.peak_queue_depth = depth + 1
+            telemetry.QUEUE_DEPTH_PEAK.set(self.peak_queue_depth)
 
         loop = asyncio.get_running_loop()
         job = Job(
@@ -224,8 +227,12 @@ class BatchingScheduler:
         inference_ms = (time.perf_counter() - started) * 1000.0
 
         self.batches_dispatched += 1
+        telemetry.BATCHES.inc()
+        telemetry.BATCH_SIZE.observe(len(batch))
+        telemetry.INFERENCE.observe(inference_ms / 1000.0)
         if error is None:
             self.requests_served += len(batch)
+            telemetry.REQUESTS.labels(outcome="served").inc(len(batch))
 
         # Resolve the waiting clients FIRST, then log. Logging is not part of
         # the latency any caller experiences.
@@ -250,6 +257,8 @@ class BatchingScheduler:
                 )
 
         for job in batch:
+            telemetry.QUEUE_WAIT.observe(dequeued_at - job.enqueued_at)
+            telemetry.E2E.observe(finished_at - job.enqueued_at)
             self._metrics.log(
                 {
                     "event": "served",

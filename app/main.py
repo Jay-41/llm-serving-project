@@ -17,8 +17,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
+from app import telemetry
 from app.backends import build_backend
 from app.config import get_settings
 from app.metrics import MetricsLogger
@@ -42,6 +44,12 @@ async def lifespan(app: FastAPI):
     metrics = MetricsLogger(settings.metrics_path)
     scheduler = BatchingScheduler(backend, settings, executor, metrics)
     scheduler.start()
+
+    # Publish the config the dashboards draw limit lines from, and wire queue
+    # depth to a callback so each scrape reads the live value rather than
+    # whatever it was when it last changed.
+    telemetry.export_config(settings.max_batch_size, settings.max_queue_depth)
+    telemetry.QUEUE_DEPTH.set_function(lambda: scheduler.queue_depth)
 
     app.state.settings = settings
     app.state.backend = backend
@@ -86,6 +94,13 @@ async def healthz() -> HealthResponse:
             scheduler.requests_served / dispatched if dispatched else 0.0
         ),
     )
+
+
+@app.get("/metrics")
+async def prometheus_metrics() -> Response:
+    """Prometheus scrape target. Plain text, not JSON — this is the exposition
+    format Prometheus parses, so it must not go through a response model."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/generate", response_model=GenerateResponse)
