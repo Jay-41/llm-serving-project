@@ -4,7 +4,7 @@ Full spec: see `llm_serving_project_spec.md` in this repo. Read it before starti
 
 ## What this is
 
-A scoped, production-flavored LLM serving system: request queueing, dynamic batching, backpressure, and (optionally) streaming and priority scheduling. Goal is to genuinely understand these systems tradeoffs well enough to defend them in an interview, and to produce real, self-measured benchmark numbers for a resume bullet — not estimates.
+A scoped, production-flavored LLM serving system: request queueing, dynamic batching, backpressure, token streaming, and priority scheduling — instrumented with Prometheus/Grafana, containerized, and deployed live. Goal is to genuinely understand these systems tradeoffs well enough to defend them in an interview, and to produce real, self-measured benchmark numbers for a resume bullet — not estimates.
 
 ## Tech stack
 
@@ -12,30 +12,38 @@ A scoped, production-flavored LLM serving system: request queueing, dynamic batc
 - Hugging Face `transformers` for the model (Qwen2.5-1.5B-Instruct or Llama-3.2-1B)  
 - In-process `asyncio.Queue` — no external broker, keep it single-node  
 - Locust or a custom async script for load testing  
-- Structured logging (CSV or JSON lines is fine) for metrics — do not skip this in early phases
+- **Per-request structured logging (JSON lines)** — the raw audit trail, one record per request. Do not skip this in early phases; it is what proves each phase's claim.  
+- **Prometheus + Grafana — core, not optional.** A `/metrics` endpoint exposing queue depth, batch size, latency and throughput, with Grafana dashboards on top. Built in Phase 4.1, before the GPU work, so Phase 6 produces real dashboard graphs instead of static charts rebuilt from CSVs afterward.  
+- **Docker + docker-compose** — one Dockerfile for the app, one compose file covering app + Prometheus + Grafana (Phase 4.2)  
+- **A PaaS target for the live mock demo** — Fly.io, Railway, or Render, CPU-only free/hobby tier (Phase 4.3)
 
 ## Working rules
 
 1. **Build against a mocked model first.** Use a fake inference function that `sleep()`s for N milliseconds instead of the real model. Validate all queueing/batching/backpressure logic on CPU with the mock before touching a real model or any GPU. Only swap in the real model for Phase 6 benchmarking.  
-2. **Log from Phase 2 onward, not just at the end.** Every request should record: enqueue time, dequeue time, batch size it was served in, inference time, end-to-end latency, and queue depth at enqueue. This is required for verifying the batching improvement as it's built, not just at the finish line.  
+2. **Log from Phase 2 onward, not just at the end.** Every request should record: enqueue time, dequeue time, batch size it was served in, inference time, end-to-end latency, and queue depth at enqueue. This is required for verifying the batching improvement as it's built, not just at the finish line. From Phase 4.1 onward the same signals are *also* exported as Prometheus metrics — the two layers coexist and do different jobs: Prometheus aggregates into time series for dashboards and alerting, while the JSONL keeps per-request granularity that aggregates cannot reconstruct.  
 3. **One phase at a time.** Finish and verify a phase (run it, check the logs/metrics prove the claim) before starting the next. Don't let scope creep across phase boundaries.  
-4. **Core path if time is short:** Phases 1, 2, 4, 6, 7 are non-negotiable. Phase 5 (priority tiers) is the first cut, Phase 3 (streaming) is the second. Don't build 3 or 5 before 1, 2, 4, 6, and 7 are solid.  
+4. **Everything is core — the plan is to ship all of it.** All ten items below are in scope, including the two formerly-stretch phases (3 streaming, 5 priority tiers). Nothing is planned for cutting. Build in the tracker's listed order; the observability/container/deploy work (4.1–4.3) deliberately comes before Phase 6 so the GPU session produces dashboard graphs and deploys a known image rather than a hand-configured box. *Last-resort fallback only, if the timeline genuinely collapses:* drop Phase 5 first, Phase 3 second — never any of 1, 2, 4, 4.1, 4.2, 4.3, 6, 7. Those three additions earn more externally-visible signal per day invested (a live service, real dashboards) than either stretch phase would.  
 5. **Commit after each phase**, not mid-phase, with a message referencing the phase and what was verified.
 
 ## Phase status tracker
 
 Update this section as work progresses. Mark each phase `todo` / `in progress` / `done`, and note the key verified metric once done.
 
+Listed in **execution order**, which is no longer the same as numeric order — Phases 4.1–4.3 were inserted after Phase 4, and Phases 3 and 5 now follow the deploy so their features ship as a new container image and land as new Grafana panels. Both still precede Phase 6, so time-to-first-token and priority behaviour are measurable in the GPU session.
+
 - [x] Phase 1 — `done`. Baseline single-request FastAPI endpoint (no batching). **Verified:** throughput flat at **1.80 rps** across concurrency 1→16 (mock backend, 64 tok/req, ~555ms service time); p50 latency grows linearly 559ms → 8878ms; inference time constant at ~555ms while queue wait absorbs all growth (6658ms mean wait at conc 16). Data: `bench/results/phase1_baseline*.csv`.  
 - [x] Phase 2 — `done`. Request queue + dynamic batching scheduler + per-request JSONL logging, on the CPU mock. **Verified:** **5.25x peak throughput** (1.80 → 9.44 rps at concurrency 16) and **p50 latency 8892ms → 1680ms**. Gains by concurrency: 2→1.82x, 4→3.18x, 8→5.13x, 16→5.25x. Honest cost: at concurrency 1 batching is 0.98x throughput / +10ms latency (the `MAX_WAIT_MS` deadline). Baseline re-measured on the same code via `MAX_BATCH_SIZE=1` as a control, reproducing Phase 1 within noise. Batch cost model: `MOCK_BATCH_ALPHA=0.08` (bandwidth-bound decode) — recalibrate in Phase 6. Data: `bench/results/phase2_*`, `logs/phase2_batching.jsonl`.  
-- [ ] Phase 3 (stretch) — Token streaming via SSE.  
 - [ ] Phase 4 — Backpressure / admission control under simulated burst load. Metric: confirm graceful rejection instead of latency collapse under overload.  
-- [ ] Phase 5 (stretch) — Priority tiers (premium vs. free scheduling).  
-- [ ] Phase 6 — Swap in real model on GPU, rerun load tests at scale, capture final p50/p95/p99 latency and max sustained throughput.  
-- [ ] Phase 7 — README with architecture, design tradeoffs, and benchmark graphs.
+- [ ] Phase 4.1 — Prometheus instrumentation + Grafana dashboards. `/metrics` endpoint exposing queue depth, batch size, latency and throughput. Est. 1 day. Metric: dashboards reproduce the Phase 2 batching result and the Phase 4 rejection behaviour live, from scrapes rather than CSVs.  
+- [ ] Phase 4.2 — Dockerize. One Dockerfile for the app, one `docker-compose.yml` covering app + Prometheus + Grafana. Est. 0.5 day. Metric: `docker compose up` brings the whole stack up clean on a fresh machine.  
+- [ ] Phase 4.3 — Deploy the mock service (CPU-only, no GPU) to a PaaS — Fly.io, Railway, or Render. Est. 0.5 day. Metric: a public URL serving `/generate` and `/healthz`, linked from the README.  
+- [ ] Phase 3 — Token streaming via SSE. Ships as a new image to the running deploy; adds a time-to-first-token panel to Grafana.  
+- [ ] Phase 5 — Priority tiers (premium vs. free scheduling). Ships the same way; adds per-tier latency panels.  
+- [ ] Phase 6 — Swap in real model on GPU, rerun load tests at scale, capture final p50/p95/p99 latency and max sustained throughput. Deploy the Phase 4.2 image to the rented box rather than hand-configuring it; capture results as Grafana graphs. Also recalibrate `MOCK_BATCH_ALPHA` against the measured real-model batch curve.  
+- [ ] Phase 7 — README with architecture, design tradeoffs, benchmark graphs, **a live demo link, and Grafana dashboard screenshots** — not just CSV-derived charts.
 
 ## Conventions
 
-- Keep the scope to a single node / single model instance. Multi-replica autoscaling is explicitly out of scope — note it as future work in the README rather than building it.  
+- Keep the scope to a single node / single model instance. Multi-replica autoscaling is explicitly out of scope — note it as future work in the README rather than building it. Deploying (Phase 4.3) does not change this: the PaaS instance runs **one replica**, and the demo is there to make the system visible, not to scale it.  
 - Prefer simple, explicit code over cleverness — this project is meant to be fully understood and defensible in an interview, not just functional.
 
