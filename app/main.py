@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException
 from app.backends import build_backend
 from app.config import get_settings
 from app.metrics import MetricsLogger
-from app.scheduler import BatchingScheduler
+from app.scheduler import BatchingScheduler, QueueFull
 from app.schemas import GenerateRequest, GenerateResponse, HealthResponse
 
 
@@ -76,9 +76,12 @@ async def healthz() -> HealthResponse:
         default_max_tokens=settings.default_max_tokens,
         max_batch_size=settings.max_batch_size,
         max_wait_ms=settings.max_wait_ms,
+        max_queue_depth=settings.max_queue_depth,
         queue_depth=scheduler.queue_depth,
+        peak_queue_depth=scheduler.peak_queue_depth,
         batches_dispatched=dispatched,
         requests_served=scheduler.requests_served,
+        requests_rejected=scheduler.requests_rejected,
         mean_batch_size=(
             scheduler.requests_served / dispatched if dispatched else 0.0
         ),
@@ -96,5 +99,24 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
             detail=f"max_tokens must be <= {settings.max_allowed_tokens}",
         )
 
-    result = await app.state.scheduler.submit(req.prompt, max_tokens)
+    try:
+        result = await app.state.scheduler.submit(req.prompt, max_tokens)
+    except QueueFull as exc:
+        # 503, not 429. The deciding question is whose fault the rejection is.
+        # 429 Too Many Requests means "you, the client, sent too much" — the
+        # code for a per-client rate limit. Admission control here is purely
+        # global queue depth: a client's very first request is refused if it
+        # arrives at a bad moment. That is server capacity, which is what 503
+        # means. (If this ever sat behind a load balancer that ejects backends
+        # on 503, switch to 429 — TGI does exactly that, for that reason.)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "server at capacity",
+                "queue_depth": exc.depth,
+                "queue_depth_limit": exc.limit,
+                "retry_after_s": settings.retry_after_s,
+            },
+            headers={"Retry-After": str(settings.retry_after_s)},
+        )
     return GenerateResponse(backend=app.state.backend.name, **result)

@@ -62,6 +62,38 @@ class Settings:
     max_batch_size: int
     max_wait_ms: float
 
+    # --- Admission control ------------------------------------------------
+    # Reject a new request outright once this many are already waiting.
+    # Set to 0 to disable entirely (unbounded queue) — that is the control
+    # condition for the Phase 4 comparison, the same trick MAX_BATCH_SIZE=1
+    # plays for Phase 2.
+    #
+    # Picking the number: queue depth is meaningless on its own; what matters
+    # is how long that depth takes to DRAIN. Depth converts to promised
+    # latency at a fixed rate:
+    #
+    #     wait_per_queued_request = batch_time / max_batch_size
+    #                             = 840ms / 8  =  ~105ms
+    #
+    # So the threshold is a latency budget in disguise. Default 16 = two full
+    # batches of backlog = ~1.7s of queueing, plus the request's own ~840ms
+    # pass, for a worst-case accepted latency around 2.5s.
+    #
+    # Bigger is not safer. A deep queue is a latency bomb: work accepted but
+    # not drained in time means the client times out anyway and the GPU burns
+    # a pass on a response nobody is waiting for. Smaller is not safer either
+    # — arrivals are jittery, and a shallow queue turns every momentary clump
+    # into a rejection while leaving capacity idle. This knob is the dial
+    # between those two failure modes.
+    #
+    # Re-derive it in Phase 6: batch_time changes on real hardware.
+    max_queue_depth: int
+
+    # Advertised on rejections via the Retry-After header. Roughly the time to
+    # drain a full queue, so a client that honours it comes back to a system
+    # that has actually made progress.
+    retry_after_s: int
+
     # --- Metrics ----------------------------------------------------------
     metrics_path: str
 
@@ -84,6 +116,8 @@ def get_settings() -> Settings:
         mock_batch_alpha=_env_float("MOCK_BATCH_ALPHA", 0.08),
         max_batch_size=_env_int("MAX_BATCH_SIZE", 8),
         max_wait_ms=_env_float("MAX_WAIT_MS", 10.0),
+        max_queue_depth=_env_int("MAX_QUEUE_DEPTH", 16),
+        retry_after_s=_env_int("RETRY_AFTER_S", 2),
         metrics_path=_env_str("METRICS_PATH", "logs/requests.jsonl"),
         model_name=_env_str("MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct"),
         model_device=_env_str("MODEL_DEVICE", "auto"),

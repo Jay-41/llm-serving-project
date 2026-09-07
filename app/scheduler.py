@@ -34,6 +34,20 @@ from app.metrics import MetricsLogger
 _POLL_INTERVAL_S = 0.001
 
 
+class QueueFull(Exception):
+    """Raised by submit() when admission control refuses a request.
+
+    Carries the numbers that justified the refusal so the handler can report
+    them and the metrics log can record them. A rejection that cannot explain
+    itself is indistinguishable from a bug.
+    """
+
+    def __init__(self, depth: int, limit: int) -> None:
+        super().__init__(f"queue depth {depth} at limit {limit}")
+        self.depth = depth
+        self.limit = limit
+
+
 class Job:
     """One in-flight request, from enqueue until its Future is resolved."""
 
@@ -87,6 +101,8 @@ class BatchingScheduler:
         # without having to parse the JSONL.
         self.batches_dispatched = 0
         self.requests_served = 0
+        self.requests_rejected = 0
+        self.peak_queue_depth = 0
 
     # -- public API --------------------------------------------------------
 
@@ -108,7 +124,31 @@ class BatchingScheduler:
         return self._queue.qsize()
 
     async def submit(self, prompt: str, max_tokens: int) -> Dict[str, Any]:
-        """Enqueue a request and wait for its batch to complete."""
+        """Enqueue a request and wait for its batch to complete.
+
+        Raises QueueFull if admission control refuses it. The check happens
+        BEFORE the job is created and enqueued, so a refused request costs the
+        server nothing but the comparison below — that speed is the point. A
+        rejection that takes as long as a real request is not backpressure.
+        """
+        depth = self._queue.qsize()
+        limit = self._settings.max_queue_depth
+        if limit > 0 and depth >= limit:
+            self.requests_rejected += 1
+            self._metrics.log(
+                {
+                    "event": "rejected",
+                    "enqueued_at": time.time(),
+                    "queue_depth_at_enqueue": depth,
+                    "queue_depth_limit": limit,
+                    "backend": self._backend.name,
+                }
+            )
+            raise QueueFull(depth=depth, limit=limit)
+
+        if depth + 1 > self.peak_queue_depth:
+            self.peak_queue_depth = depth + 1
+
         loop = asyncio.get_running_loop()
         job = Job(
             request_id=next(self._ids),
@@ -118,7 +158,9 @@ class BatchingScheduler:
             enqueued_at=time.perf_counter(),
             enqueued_wall=time.time(),
             # Depth *before* this job joins, i.e. how many were already ahead.
-            queue_depth_at_enqueue=self._queue.qsize(),
+            # Reuse the value the admission check read, so the number that
+            # justified accepting the request is the number that gets logged.
+            queue_depth_at_enqueue=depth,
         )
         self._queue.put_nowait(job)
         return await job.future
@@ -210,6 +252,7 @@ class BatchingScheduler:
         for job in batch:
             self._metrics.log(
                 {
+                    "event": "served",
                     "request_id": job.request_id,
                     "enqueued_at": job.enqueued_wall,
                     "dequeued_at": dequeued_wall,

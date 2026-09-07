@@ -41,6 +41,8 @@ All via environment variables (see `app/config.py`):
 | `MOCK_BATCH_ALPHA` | `0.08` | Marginal cost of each extra request in a batch |
 | `MAX_BATCH_SIZE` | `8` | Batch dispatches when this full. `1` disables batching |
 | `MAX_WAIT_MS` | `10` | Batch dispatches when this elapses, whichever comes first |
+| `MAX_QUEUE_DEPTH` | `16` | Reject with 503 once this many are queued. `0` disables admission control |
+| `RETRY_AFTER_S` | `2` | Value of the `Retry-After` header on rejections |
 | `METRICS_PATH` | `logs/requests.jsonl` | Per-request JSONL sink |
 | `DEFAULT_MAX_TOKENS` | `64` | Used when a request omits `max_tokens` |
 | `MODEL_NAME` | `Qwen/Qwen2.5-1.5B-Instruct` | Phase 6 only |
@@ -68,6 +70,15 @@ recalibrate against measured Qwen numbers in Phase 6.
 
 Closed-loop: each of N workers keeps one request in flight and sends the next
 as soon as the previous returns, so the numbers measure saturation throughput.
+
+For **overload** testing use the open-loop generator instead — the closed-loop
+one cannot overload the server, because it waits for responses and therefore
+self-throttles to the drain rate:
+
+```bash
+.venv/bin/python -m bench.burst --rate 20 --duration 20 --bucket 4 \
+  --out bench/results/phase4_admission.csv
+```
 
 Compare two runs:
 
@@ -175,6 +186,117 @@ concurrency exactly:
 | 2 | 40 |
 | 4 | 40 |
 | 8 | 80 |
+
+## Phase 4 results: backpressure / admission control
+
+Phase 2 ended with the system saturated: throughput pinned at ~9.4 rps past
+concurrency 8, queue wait climbing again. The queue was unbounded, so offered
+load beyond the drain rate had nowhere to go but into everyone's latency.
+
+Admission control rejects a new request with **503 Service Unavailable** once
+`MAX_QUEUE_DEPTH` requests are already waiting. `MAX_QUEUE_DEPTH=0` disables it,
+which is the control condition below.
+
+### Choosing the threshold
+
+Queue depth alone is meaningless — what matters is how long it takes to *drain*.
+Depth converts to promised latency at a fixed rate:
+
+```
+wait per queued request = batch_time / max_batch_size = 840ms / 8 ≈ 105ms
+```
+
+So the threshold is a latency budget in disguise. Working backwards from a
+target:
+
+| Target p99 end-to-end | Wait budget (minus own 840ms pass) | Implied depth |
+| ---: | ---: | ---: |
+| 1.5 s | 660 ms | ~6 |
+| **2.5 s** | **1,660 ms** | **~16** |
+| 5.0 s | 4,160 ms | ~40 |
+
+**16 was chosen** — a tidy `2 × MAX_BATCH_SIZE`, i.e. *"a request may sit behind
+at most two batches of backlog."* Bigger is not safer: a deep queue is a latency
+bomb, because work accepted but not drained in time means the client times out
+anyway and the GPU burns a pass on a response nobody is waiting for. Smaller is
+not safer either: arrivals are jittery, and a shallow queue turns every
+momentary clump into a rejection while capacity sits idle.
+
+The prediction was checked against the run. Predicted worst-case queue wait
+1,660ms; **measured maximum 1,693ms — within 2%.**
+
+### Why 503 and not 429
+
+The deciding question is whose fault the rejection is. `429 Too Many Requests`
+means *you, the client, sent too much* — the code for a per-client rate limit or
+quota. Nothing here is measured per client: the check is global queue depth, so
+a client's very first request is refused if it arrives at a bad moment. That is
+server capacity, which is what `503` means. A `Retry-After` header carries the
+back-off signal.
+
+The honest counterargument: many load balancers treat 503 as "this backend is
+unhealthy, eject it," which is wrong here — the server is fine, just full.
+HuggingFace's TGI returns 429 for a full queue for that reason. Behind such a
+load balancer, switch to 429.
+
+### The test: sustained overload, 20 rps offered against a ~9.4 rps system
+
+This needs an **open-loop** generator (`bench/burst.py`). The Phase 2 closed-loop
+tester structurally cannot overload anything — its workers wait for a response
+before sending again, so offered load throttles itself to whatever the server can
+serve. Overload testing requires sending on a fixed schedule regardless of
+whether the server is keeping up.
+
+```bash
+MAX_QUEUE_DEPTH=0  uvicorn app.main:app --port 8000   # control
+MAX_QUEUE_DEPTH=16 uvicorn app.main:app --port 8000   # protected
+.venv/bin/python -m bench.burst --rate 20 --duration 20 --bucket 4
+```
+
+| | Admission control OFF | Admission control ON |
+| --- | ---: | ---: |
+| Offered | 400 @ 20 rps | 400 @ 20 rps |
+| Accepted | 400 (100%) | 201 (50.2%) |
+| Rejected | 0 | 199 |
+| **Accepted p50** | **11,996 ms** | **2,312 ms** |
+| **Accepted p99** | **22,831 ms** | **2,535 ms** |
+| Accepted max | 23,021 ms | 2,543 ms |
+| Rejection p50 | — | **3.9 ms** |
+| Peak queue depth | **214** | **16** |
+| Wall clock to drain | 42.7 s | 21.7 s |
+| **Goodput** | **9.37 rps** | **9.27 rps** |
+
+### The headline: latency over time
+
+Bucketed by when load was offered — this is the actual proof, not the 503s:
+
+| Offer window | OFF: p50 | OFF: max | ON: p50 | ON: max |
+| ---: | ---: | ---: | ---: | ---: |
+| 0–4 s | 3,114 ms | 5,363 ms | 2,182 ms | 2,536 ms |
+| 4–8 s | 7,566 ms | 9,804 ms | 2,322 ms | 2,515 ms |
+| 8–12 s | 11,996 ms | 14,239 ms | 2,347 ms | 2,543 ms |
+| 12–16 s | 16,428 ms | 18,657 ms | 2,353 ms | 2,516 ms |
+| 16–20 s | 20,841 ms | 23,021 ms | 2,325 ms | 2,529 ms |
+
+**Unprotected, latency grows without bound for as long as the overload lasts** —
+p50 climbs linearly 3.1s → 20.8s and would keep going. **Protected, it is flat**:
+2.18s → 2.33s across the entire run, never exceeding 2.55s.
+
+### The finding that actually matters
+
+**Goodput is 9.37 rps unprotected vs 9.27 rps protected — statistically
+identical.** Admission control gave up about 1% of useful work.
+
+That is the whole argument. The unprotected server was never doing *more* work;
+it was doing the same work while also holding 214 requests hostage and quoting
+everyone a 20-second latency. Rejecting the excess in 3.9ms costs essentially
+nothing in throughput and buys a latency bound — and a client told "no" in 4ms
+can retry, shed load, or fail over, while a client waiting 23 seconds has already
+timed out and burned a GPU pass on an answer nobody will read.
+
+`logs/phase4_*.jsonl` carries the audit trail: `queue_depth_at_enqueue` reaches
+214 unprotected and never exceeds 15 protected, with every rejection recorded as
+its own `"event": "rejected"` record.
 
 ### A note on making the mock honest
 

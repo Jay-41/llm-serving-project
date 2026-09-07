@@ -38,7 +38,13 @@ class HealthResponse(BaseModel):
     default_max_tokens: int
     max_batch_size: int
     max_wait_ms: float
+
+    # 0 means admission control is off — an unbounded queue.
+    max_queue_depth: int
     queue_depth: int
+    peak_queue_depth: int
+
     batches_dispatched: int
     requests_served: int
+    requests_rejected: int
     mean_batch_size: float
