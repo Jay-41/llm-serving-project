@@ -1,0 +1,65 @@
+# Render Blueprint — the live CPU-only demo.
+#
+# Deploys ONLY the serving layer. Prometheus and Grafana stay local: the compose
+# stack runs Grafana with anonymous admin access, which is fine on localhost and
+# would be reckless on a public URL. The public surface is /generate, /healthz
+# and /metrics.
+#
+# To deploy: Render Dashboard -> New -> Blueprint -> pick this repo. Render reads
+# this file, so the service configuration is version-controlled rather than
+# click-ops that nobody can reproduce.
+#
+# Free tier notes:
+#   - The instance sleeps after ~15 minutes idle and cold-starts on the next
+#     request, which takes roughly 30-60s. Documented in the README so a demo
+#     link that hangs briefly does not read as a broken service.
+#   - 512MB RAM / 0.1 CPU. The mock backend spends its time in sleep() rather
+#     than burning CPU, so latency here tracks the local numbers; throughput
+#     under heavy concurrent load will not. Benchmarks come from local runs and
+#     Phase 6, never from this instance.
+
+services:
+  - type: web
+    name: llm-serving-demo
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+
+    # Render polls this until it returns 200 before routing traffic to a new
+    # deploy, so a broken build never replaces a working one.
+    healthCheckPath: /healthz
+
+    autoDeploy: true
+
+    envVars:
+      - key: BACKEND
+        value: mock
+
+      # Same scheduler settings as local, so the deployed service behaves like
+      # the one the benchmarks describe.
+      - key: MAX_BATCH_SIZE
+        value: "8"
+      - key: MAX_WAIT_MS
+        value: "10"
+      - key: MAX_QUEUE_DEPTH
+        value: "16"
+      - key: MOCK_BATCH_ALPHA
+        value: "0.08"
+      - key: DEFAULT_MAX_TOKENS
+        value: "64"
+
+      # Tighter than the local default of 512. This endpoint is public and
+      # unauthenticated, and mock cost scales linearly with max_tokens, so this
+      # caps what a single caller can ask the instance to sleep for.
+      - key: MAX_ALLOWED_TOKENS
+        value: "128"
+
+      # Render's free tier has an ephemeral filesystem with no persistent disk,
+      # so these records survive only until the next restart. That is acceptable
+      # here — the JSONL is evidence for local benchmark runs, and the live
+      # instance is observed through /metrics.
+      - key: METRICS_PATH
+        value: "/app/logs/requests.jsonl"

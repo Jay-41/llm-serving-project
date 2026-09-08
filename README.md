@@ -42,6 +42,48 @@ it):
 docker compose exec app tail -f /app/logs/requests.jsonl
 ```
 
+## Live demo
+
+> **Status: not yet deployed.** `render.yaml` is ready; see *Deploying* below.
+> The URL lands here once it exists.
+
+The deployed instance runs the **mock backend on CPU** — it demonstrates the
+queueing, batching and admission-control behaviour, not model quality. It is
+also **not** where benchmark numbers come from: those are local runs, and Phase
+6 on a GPU.
+
+Two things to expect from Render's free tier:
+
+- The instance **sleeps after ~15 minutes idle**, so the first request after a
+  quiet spell takes 30–60s to cold-start. Subsequent ones are normal.
+- **0.1 CPU / 512MB.** The mock spends its time in `sleep()` rather than
+  burning CPU, so latency tracks the local figures; sustained throughput under
+  heavy concurrency will not.
+
+## Deploying
+
+`render.yaml` is a Render Blueprint, so the service configuration is
+version-controlled rather than click-ops nobody can reproduce.
+
+1. Sign in at [dashboard.render.com](https://dashboard.render.com) and
+   authorize the Render GitHub app for this repository (it is private, so
+   Render needs explicit access — granting it to just this repo is enough).
+2. **New → Blueprint**, select `llm-serving-project`, branch `main`.
+3. Render reads `render.yaml` and proposes one free web service,
+   `llm-serving-demo`. Apply.
+4. First build takes a few minutes. `healthCheckPath: /healthz` means Render
+   waits for a 200 before routing traffic, so a broken build never replaces a
+   working one.
+
+Only the **app** is deployed. Prometheus and Grafana stay local — the compose
+stack runs Grafana with anonymous admin access, which is fine on localhost and
+reckless on a public URL. The public surface is `/generate`, `/healthz` and
+`/metrics`.
+
+`MAX_ALLOWED_TOKENS` is 128 in `render.yaml` versus 512 locally: the endpoint is
+public and unauthenticated, and mock cost scales linearly with `max_tokens`, so
+this bounds what one caller can make the instance sleep for.
+
 ## Local setup without Docker
 
 ```bash
