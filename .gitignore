@@ -10,3 +10,7 @@ __pycache__/
 # Default ad-hoc metrics sink. Named benchmark logs under logs/ are kept as
 # evidence and committed explicitly.
 logs/requests.jsonl
+
+# Ad-hoc demo/scratch runs (named phase logs are kept as evidence).
+logs/demo.jsonl
+logs/smoke*.jsonl
