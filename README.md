@@ -6,21 +6,56 @@ server. See `llm_serving_project_spec.md` for the full spec and phase plan.
 > The architecture writeup, design-tradeoff discussion, and benchmark graphs
 > are Phase 7 deliverables. This file is setup and run instructions only.
 
-## Setup
+## Quick start
+
+The whole stack — serving layer, Prometheus, Grafana — in one command:
+
+```bash
+docker compose up -d --build
+```
+
+| | |
+| --- | --- |
+| App | http://localhost:8000 |
+| Grafana | http://localhost:3000 (opens on the dashboard, no login) |
+| Prometheus | http://localhost:9090 |
+
+Cold start from wiped volumes takes about 6 seconds. Every setting is
+overridable from the shell, which is how the Phase 4 control comparison runs
+without editing anything:
+
+```bash
+MAX_QUEUE_DEPTH=0 docker compose up -d app   # admission control off
+docker compose up -d app                     # back to the default 16
+```
+
+```bash
+docker compose down      # stop, keep metrics history
+docker compose down -v   # stop and wipe volumes
+```
+
+Per-request logs live in a named volume (the container runs as uid 10001, so a
+bind mount would arrive owned by the host user and the app could not write to
+it):
+
+```bash
+docker compose exec app tail -f /app/logs/requests.jsonl
+```
+
+## Local setup without Docker
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m uvicorn app.main:app --port 8000
 ```
 
 `requirements-model.txt` (torch/transformers) is **not** needed until Phase 6.
-Phases 1-5 run entirely on the CPU mock backend.
+Everything through Phase 5 runs on the CPU mock backend.
 
-## Run the server
-
-```bash
-.venv/bin/python -m uvicorn app.main:app --port 8000
-```
+Running Prometheus in a container against an app on the host needs the scrape
+target changed to `host.docker.internal:8000` and
+`--add-host=host.docker.internal:host-gateway`; see `ops/prometheus/prometheus.yml`.
 
 ```bash
 curl -X POST localhost:8000/generate \
@@ -343,23 +378,9 @@ worthless.
 
 ### Running it
 
-```bash
-docker network create llm-obs
-docker run -d --name prometheus --network llm-obs -p 9090:9090 \
-  --add-host=host.docker.internal:host-gateway \
-  -v "$(pwd)/ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro" \
-  prom/prometheus --config.file=/etc/prometheus/prometheus.yml
-docker run -d --name grafana --network llm-obs -p 3000:3000 \
-  -e GF_AUTH_ANONYMOUS_ENABLED=true -e GF_AUTH_ANONYMOUS_ORG_ROLE=Admin \
-  -v "$(pwd)/ops/grafana/provisioning:/etc/grafana/provisioning:ro" \
-  -v "$(pwd)/ops/grafana/dashboards:/var/lib/grafana/dashboards:ro" \
-  grafana/grafana
-```
-
-Dashboard at **http://localhost:3000** — datasource and dashboard are
-auto-provisioned, so this is version-controlled config rather than hand-built UI
-state that dies with the container. Phase 4.2 collapses both commands into one
-`docker compose up`.
+`docker compose up -d` (see Quick start). Datasource and dashboard are
+auto-provisioned from `ops/grafana/`, so they are version-controlled config
+rather than hand-built UI state that dies with the container.
 
 ### Verification
 
@@ -407,6 +428,64 @@ within 0.4%.
 and it is only as good as the resolution near the number you actually act on.
 The tail above 20s stays coarse on purpose — the difference between a 23s and a
 29s p99 changes no decision, since both mean the same thing.
+
+## Phase 4.2: containerization
+
+One `Dockerfile` for the app, one `docker-compose.yml` for the whole stack.
+See **Quick start** above for usage.
+
+**Cold start from nothing** — `docker compose down -v`, `build --no-cache`,
+`up -d` — brings all three services healthy in **6.2 seconds**, with the Grafana
+dashboard provisioned onto a wiped volume and Prometheus already scraping. No
+manual steps.
+
+### Decisions worth defending
+
+**Python 3.12 in the image, though development was on 3.9.** The code is
+3.9-compatible, but there is no reason to ship an interpreter three years older
+than necessary, and Phase 6 adds torch.
+
+**Dependencies copied before source.** Editing a `.py` file then rebuilds in
+~2s instead of ~40s, because the `pip install` layer stays cached.
+
+**Non-root (uid 10001).** Nothing here needs root, and Phase 4.3 puts this image
+on the public internet. This is also why logs go to a *named volume* rather than
+a bind mount — a bind mount arrives owned by the host user, and the container
+user cannot write to it.
+
+**Health check uses the interpreter, not curl.** `python:3.12-slim` ships
+neither curl nor wget, and installing one purely for a health check is a wasted
+layer plus extra attack surface when Python is already present.
+
+**Prometheus waits on `service_healthy`, not just container start.** Otherwise
+it records a stretch of failed scrapes during app startup and every panel opens
+with a gap.
+
+**Grafana opens directly on the dashboard**
+(`GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH`). Grafana's default home page
+lists only dashboards *you have already visited*, so a freshly provisioned
+dashboard is invisible on a new browser — it looks like provisioning failed
+when it did not.
+
+**Image is 270MB**, essentially all base image and dependencies.
+
+### Containerizing changed nothing measurable
+
+The Phase 4 comparison re-run against the containerized app:
+
+| | Host process | Container |
+| --- | ---: | ---: |
+| Accepted / rejected | 201 / 199 | 204 / 196 |
+| Accepted p50 | 2,312 ms | 2,290 ms |
+| Accepted p99 | 2,534 ms | 2,519 ms |
+| Goodput | 9.28 rps | 9.21 rps |
+| Peak queue depth | 16 | 16 |
+
+Unprotected, via `MAX_QUEUE_DEPTH=0 docker compose up -d app`: p50 **11,788 ms**,
+p99 **22,480 ms**, peak depth **210** — reproducing the host result. The
+`.dockerignore` keeps `.venv/`, `logs/` and `bench/results/` out of the build
+context; the venv alone is hundreds of MB and its binaries are built for the
+host, so copying it into a Linux image would be both slow and wrong.
 
 ### A note on making the mock honest
 

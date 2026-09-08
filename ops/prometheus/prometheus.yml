@@ -18,13 +18,13 @@ scrape_configs:
   - job_name: llm-serving
     metrics_path: /metrics
     static_configs:
-      # Phase 4.1: Prometheus runs in a container, the app still runs on the
-      # host, so the app is reached through the host gateway. Phase 4.2
-      # containerizes the app too and this becomes the compose service name,
-      # "app:8000".
-      - targets: ["host.docker.internal:8000"]
+      # Compose service name — Docker's embedded DNS resolves "app" to the
+      # serving container on the project network. To point this at an app
+      # running on the host instead, use host.docker.internal:8000 and start
+      # Prometheus with --add-host=host.docker.internal:host-gateway.
+      - targets: ["app:8000"]
         labels:
-          instance: local
+          instance: compose
 
   - job_name: prometheus
     static_configs:

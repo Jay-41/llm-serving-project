@@ -1,0 +1,90 @@
+# The whole stack: serving layer + Prometheus + Grafana.
+#
+#   docker compose up -d --build      bring everything up
+#   docker compose down               stop, keep the metrics history
+#   docker compose down -v            stop and wipe the volumes too
+#
+# Grafana:    http://localhost:3000   (dashboard auto-provisioned, no login)
+# Prometheus: http://localhost:9090
+# App:        http://localhost:8000
+#
+# Every knob is overridable from the shell, which is how the Phase 4 control
+# comparison is run without editing this file:
+#
+#   MAX_QUEUE_DEPTH=0 docker compose up -d app     # admission control off
+#   docker compose up -d app                       # back to the default 16
+
+name: llm-serving
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-serving-app:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      BACKEND: "${BACKEND:-mock}"
+      MAX_BATCH_SIZE: "${MAX_BATCH_SIZE:-8}"
+      MAX_WAIT_MS: "${MAX_WAIT_MS:-10}"
+      MAX_QUEUE_DEPTH: "${MAX_QUEUE_DEPTH:-16}"
+      DEFAULT_MAX_TOKENS: "${DEFAULT_MAX_TOKENS:-64}"
+      MOCK_BATCH_ALPHA: "${MOCK_BATCH_ALPHA:-0.08}"
+      METRICS_PATH: "/app/logs/requests.jsonl"
+    volumes:
+      # Named volume rather than a bind mount: the container runs as uid 10001,
+      # and a bind mount would arrive owned by the host user, leaving the app
+      # unable to write its own log. Read them with:
+      #   docker compose exec app tail -f /app/logs/requests.jsonl
+      - app-logs:/app/logs
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 24h is plenty for benchmark runs and keeps the volume small. Raise it
+      # if you want to compare runs across days.
+      - --storage.tsdb.retention.time=24h
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      # Wait for the health check, not just for the container to exist —
+      # otherwise Prometheus records a stretch of failed scrapes at startup
+      # and the dashboard opens with a gap in every panel.
+      app:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Anonymous admin access. Fine for a local stack; Phase 4.3 does NOT
+      # expose Grafana publicly, only the app itself.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      # Land on the serving dashboard instead of Grafana's empty home page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: "/var/lib/grafana/dashboards/llm-serving.json"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  app-logs:
+  prometheus-data:
+  grafana-data:

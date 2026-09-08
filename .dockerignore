@@ -1,0 +1,26 @@
+# The virtualenv is the big one — hundreds of MB, and its binaries are built
+# for the host, so copying it into a Linux image would be both slow and wrong.
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+.git/
+.gitignore
+.DS_Store
+
+# Benchmark artifacts and evidence logs. These are outputs of running the
+# system, not inputs to building it; baking them in would grow the image and
+# make it non-reproducible.
+logs/
+bench/results/
+
+# Dev tooling and docs that the running service does not need.
+bench/
+ops/
+README.md
+CLAUDE.md
+llm_serving_project_spec.md
+Dockerfile
+docker-compose.yml
+.dockerignore
