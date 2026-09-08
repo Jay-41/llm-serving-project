@@ -109,6 +109,19 @@ BATCH_SIZE = Histogram(
 
 
 def export_config(max_batch_size: int, max_queue_depth: int) -> None:
-    """Publish the settings the dashboards draw limit lines from."""
+    """Publish the settings the dashboards draw limit lines from, and
+    materialise every label value at zero.
+
+    Touching both `outcome` children matters more than it looks. A Prometheus
+    client only creates a labelled series the first time it is used, so a run
+    with no rejections exports no `outcome="rejected"` series at all — and a
+    panel querying it renders an empty legend entry rather than a flat zero
+    line. Worse, `rate()` over a series that springs into existence mid-window
+    has nothing to compare against, so the first rejection is undercounted.
+    Initialising both up front means "zero rejections" is reported as zero
+    rather than as silence.
+    """
     MAX_BATCH_SIZE.set(max_batch_size)
     QUEUE_DEPTH_LIMIT.set(max_queue_depth)
+    REQUESTS.labels(outcome="served")
+    REQUESTS.labels(outcome="rejected")
