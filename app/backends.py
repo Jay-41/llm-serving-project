@@ -189,7 +189,7 @@ class QwenBackend:
 
         self._model = AutoModelForCausalLM.from_pretrained(
             s.model_name,
-            torch_dtype=dtype,
+            dtype=dtype,
         ).to(device)
         self._model.eval()
         self._device = device

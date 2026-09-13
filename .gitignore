@@ -14,3 +14,6 @@ logs/requests.jsonl
 # Ad-hoc demo/scratch runs (named phase logs are kept as evidence).
 logs/demo.jsonl
 logs/smoke*.jsonl
+
+# Model venv (Python 3.12 + torch); the lightweight .venv stays for Phases 1-5.
+.venv-model/
