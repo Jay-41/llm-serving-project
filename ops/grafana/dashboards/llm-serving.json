@@ -2,23 +2,51 @@
   "uid": "llm-serving",
   "title": "LLM Serving Layer",
   "description": "Batching, queueing and admission control for a single-node LLM server. Panels are arranged to retell the two results this project proved: Phase 2 (batching trades inference time for a collapse in queue wait) and Phase 4 (admission control bounds latency under overload at ~1% goodput cost).",
-  "tags": ["llm", "serving", "batching", "backpressure"],
+  "tags": [
+    "llm",
+    "serving",
+    "batching",
+    "backpressure"
+  ],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "5s",
-  "time": { "from": "now-15m", "to": "now" },
-  "timepicker": { "refresh_intervals": ["1s", "5s", "10s", "30s", "1m"] },
-  "annotations": { "list": [] },
-  "templating": { "list": [] },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "1s",
+      "5s",
+      "10s",
+      "30s",
+      "1m"
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
   "panels": [
     {
       "id": 1,
       "type": "stat",
       "title": "Goodput",
-      "description": "Requests actually completed per second. Under overload this should stay flat at the drain rate whether or not admission control is on — that equivalence is the Phase 4 finding.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "description": "Requests actually completed per second. Under overload this should stay flat at the drain rate whether or not admission control is on \u2014 that equivalence is the Phase 4 finding.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -30,13 +58,30 @@
         "defaults": {
           "unit": "reqps",
           "decimals": 2,
-          "color": { "mode": "fixed", "fixedColor": "green" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "green"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "value",
         "graphMode": "area",
         "textMode": "auto",
@@ -48,9 +93,17 @@
       "id": 2,
       "type": "stat",
       "title": "Load shed",
-      "description": "Share of arrivals refused with 503. This is not an error rate — it is the system correctly declining work it could not have completed within its latency budget. Zero under normal load; rises only past capacity.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "description": "Share of arrivals refused with 503. This is not an error rate \u2014 it is the system correctly declining work it could not have completed within its latency budget. Zero under normal load; rises only past capacity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -67,15 +120,27 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "blue", "value": 1 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              }
             ]
           }
         },
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "value",
         "graphMode": "area",
         "textMode": "auto",
@@ -88,8 +153,16 @@
       "type": "stat",
       "title": "p99 end-to-end",
       "description": "99th percentile latency for accepted requests. With MAX_QUEUE_DEPTH=16 this should sit near 2.5s and stay there under sustained overload.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -104,16 +177,31 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "orange", "value": 3 },
-              { "color": "red", "value": 10 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 3
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
             ]
           }
         },
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "value",
         "graphMode": "area",
         "textMode": "auto",
@@ -126,8 +214,16 @@
       "type": "stat",
       "title": "Mean batch size",
       "description": "Requests per forward pass. This is the number that has to rise with load for batching to be doing anything; it saturates at MAX_BATCH_SIZE, and that saturation is where throughput stops scaling.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
@@ -140,13 +236,30 @@
           "unit": "short",
           "decimals": 2,
           "min": 0,
-          "color": { "mode": "fixed", "fixedColor": "purple" },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] }
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "purple",
+                "value": null
+              }
+            ]
+          }
         },
         "overrides": []
       },
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "value",
         "graphMode": "area",
         "textMode": "auto",
@@ -157,10 +270,18 @@
     {
       "id": 5,
       "type": "timeseries",
-      "title": "Throughput — served vs rejected",
+      "title": "Throughput \u2014 served vs rejected",
       "description": "Offered load splits into these two lines. Past capacity, 'served' flattens at the drain rate and the surplus appears as 'rejected' rather than as growing latency.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
       "targets": [
         {
           "refId": "A",
@@ -187,59 +308,160 @@
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "served (goodput)" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "served (goodput)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "rejected (503)" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "rejected (503)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
           }
         ]
       },
       "options": {
-        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
       "id": 6,
       "type": "timeseries",
       "title": "Queue depth vs admission limit",
-      "description": "The core Phase 4 evidence. Unprotected (limit = 0) this climbs without bound — it reached 214 in testing. Protected, it is pinned under the limit line and stays there.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "description": "The core Phase 4 evidence. Unprotected (limit = 0) this climbs without bound \u2014 it reached 214 in testing. Protected, it is pinned under the limit line and stays there.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
       "targets": [
-        { "refId": "A", "expr": "llm_queue_depth", "legendFormat": "current depth" },
-        { "refId": "B", "expr": "llm_queue_depth_peak", "legendFormat": "peak seen" },
-        { "refId": "C", "expr": "llm_queue_depth_limit > 0", "legendFormat": "admission limit" }
+        {
+          "refId": "A",
+          "expr": "llm_queue_depth",
+          "legendFormat": "current depth"
+        },
+        {
+          "refId": "B",
+          "expr": "llm_queue_depth_peak",
+          "legendFormat": "peak seen"
+        },
+        {
+          "refId": "C",
+          "expr": "llm_queue_depth_limit > 0",
+          "legendFormat": "admission limit"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "min": 0,
-          "custom": { "lineWidth": 2, "fillOpacity": 10, "showPoints": "never", "spanNulls": true }
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "admission limit" },
+            "matcher": {
+              "id": "byName",
+              "options": "admission limit"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
-              { "id": "custom.fillOpacity", "value": 0 },
-              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "peak seen" },
+            "matcher": {
+              "id": "byName",
+              "options": "peak seen"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "semi-dark-orange" } },
-              { "id": "custom.fillOpacity", "value": 0 }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-orange"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
             ]
           }
         ]
       },
       "options": {
-        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
@@ -247,8 +469,16 @@
       "type": "timeseries",
       "title": "End-to-end latency percentiles",
       "description": "Accepted-request latency. Under sustained overload without admission control these climb linearly and do not level off; with it they are flat.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
       "targets": [
         {
           "refId": "A",
@@ -270,22 +500,46 @@
         "defaults": {
           "unit": "s",
           "min": 0,
-          "custom": { "lineWidth": 2, "fillOpacity": 8, "showPoints": "never", "spanNulls": true }
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         },
         "overrides": []
       },
       "options": {
-        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
       "id": 8,
       "type": "timeseries",
-      "title": "Where the time goes — queue wait vs inference",
-      "description": "The Phase 2 story in one panel. Batching makes inference SLOWER (more work per pass) while collapsing queue wait. If queue wait dominates, the bottleneck is the line, not the model — and that is when batching pays.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "title": "Where the time goes \u2014 queue wait vs inference",
+      "description": "The Phase 2 story in one panel. Batching makes inference SLOWER (more work per pass) while collapsing queue wait. If queue wait dominates, the bottleneck is the line, not the model \u2014 and that is when batching pays.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
       "targets": [
         {
           "refId": "A",
@@ -302,22 +556,63 @@
         "defaults": {
           "unit": "s",
           "min": 0,
-          "custom": { "lineWidth": 2, "fillOpacity": 15, "showPoints": "never", "spanNulls": true, "stacking": { "mode": "none" } }
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none"
+            }
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "queue wait p50" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "queue wait p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "inference p50" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "inference p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
           }
         ]
       },
       "options": {
-        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
@@ -325,40 +620,100 @@
       "type": "timeseries",
       "title": "Batch size vs cap",
       "description": "Mean requests per forward pass against the configured MAX_BATCH_SIZE. When the mean pins to the cap, the batcher is saturated and additional load turns into queue depth rather than bigger batches.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
       "targets": [
         {
           "refId": "A",
           "expr": "sum(rate(llm_batch_size_sum[15s])) / clamp_min(sum(rate(llm_batch_size_count[15s])), 0.0001)",
           "legendFormat": "mean batch size"
         },
-        { "refId": "B", "expr": "llm_max_batch_size", "legendFormat": "cap" }
+        {
+          "refId": "B",
+          "expr": "llm_max_batch_size",
+          "legendFormat": "cap"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "min": 0,
-          "custom": { "lineWidth": 2, "fillOpacity": 12, "showPoints": "never", "spanNulls": true }
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 12,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "cap" },
+            "matcher": {
+              "id": "byName",
+              "options": "cap"
+            },
             "properties": [
-              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
-              { "id": "custom.fillOpacity", "value": 0 },
-              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
             ]
           },
           {
-            "matcher": { "id": "byName", "options": "mean batch size" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "mean batch size"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
           }
         ]
       },
       "options": {
-        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["mean", "max"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
@@ -366,8 +721,16 @@
       "type": "timeseries",
       "title": "Cumulative outcomes",
       "description": "Running totals since startup. Useful for reading a completed benchmark run at a glance: the final split between served and rejected.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
       "targets": [
         {
           "refId": "A",
@@ -379,32 +742,272 @@
           "expr": "sum(llm_requests_total{outcome=\"rejected\"})",
           "legendFormat": "rejected total"
         },
-        { "refId": "C", "expr": "sum(llm_batches_total)", "legendFormat": "forward passes" }
+        {
+          "refId": "C",
+          "expr": "sum(llm_batches_total)",
+          "legendFormat": "forward passes"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "min": 0,
-          "custom": { "lineWidth": 2, "fillOpacity": 0, "showPoints": "never", "spanNulls": true }
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": true
+          }
         },
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "served total" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "served total"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "rejected total" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "rejected total"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
           },
           {
-            "matcher": { "id": "byName", "options": "forward passes" },
-            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }]
+            "matcher": {
+              "id": "byName",
+              "options": "forward passes"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
           }
         ]
       },
       "options": {
-        "legend": { "showLegend": true, "displayMode": "list", "placement": "bottom", "calcs": ["last"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "last"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Time to first token",
+      "description": "Enqueue until the first token existed, server-side. Under capacity this is ~60ms (queue wait + prefill) regardless of how long the full response takes \u2014 that gap is what streaming delivers. Over capacity it jumps by one full batch duration: a request arriving mid-batch waits for someone else's generation to finish. That jump is the static-batching cost continuous batching removes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_ttft_seconds_bucket[30s])) by (le))",
+          "legendFormat": "ttft p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(llm_ttft_seconds_bucket[30s])) by (le))",
+          "legendFormat": "ttft p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_request_duration_seconds_bucket[30s])) by (le))",
+          "legendFormat": "full response p50"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "full response p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "semi-dark-blue"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    6,
+                    6
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ttft p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ttft p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Token throughput",
+      "description": "Tokens generated per second across all requests \u2014 the throughput unit that matters for a text generator, since requests vary in length. Should be identical whether clients stream or not: streaming changes when tokens are delivered, not how fast they are produced.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(llm_tokens_generated_total[15s]))",
+          "legendFormat": "tokens/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tokens/s"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     }
   ]

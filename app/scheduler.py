@@ -1,11 +1,10 @@
-"""Request queue + dynamic batching scheduler.
+"""Request queue + dynamic batching scheduler + streaming delivery.
 
 The Phase 1 endpoint ran inference inline, one request at a time, so
 concurrent callers simply queued behind each other in a thread pool and
 throughput flatlined. Here the handler instead parks each request on an
-asyncio.Queue and awaits a Future; a single background task drains that queue,
-groups whatever it finds into a batch, and runs one forward pass for the whole
-group.
+asyncio.Queue; a single background task drains that queue, groups whatever it
+finds into a batch, and drives one generation for the whole group.
 
 The batching rule -- dispatch when EITHER the batch is full OR a deadline
 expires -- is the whole tradeoff in two lines:
@@ -18,6 +17,19 @@ expires -- is the whole tradeoff in two lines:
 
 That asymmetry is why the deadline is cheap: it only costs latency exactly
 when the system has spare capacity to give.
+
+Streaming (Phase 3): the backend yields one decode step at a time, and each
+step carries one token for every sequence in the batch. The scheduler routes
+each token as it arrives -- straight to a streaming job's queue, or into a
+buffer for a job that wants the whole response at once. Both kinds can share a
+batch. What streaming changes is when bytes reach the client, not how much
+work the model does; throughput is identical either way.
+
+What it does NOT do is continuous batching. A batch is static: once it starts,
+nobody joins until it finishes, so a request arriving mid-batch waits for
+someone else's remaining steps before its own prefill. That wait shows up
+directly in time-to-first-token under load, and it is exactly what systems
+like vLLM eliminate. Out of scope here; measured rather than hidden.
 """
 
 import asyncio
@@ -49,17 +61,35 @@ class QueueFull(Exception):
         self.limit = limit
 
 
+class StreamDone:
+    """Terminal item on a streaming job's queue. Carries the same result dict
+    a non-streaming response would have returned, so the client gets the full
+    timing breakdown at the end of the stream."""
+
+    __slots__ = ("result",)
+
+    def __init__(self, result: Dict[str, Any]) -> None:
+        self.result = result
+
+
 class Job:
-    """One in-flight request, from enqueue until its Future is resolved."""
+    """One in-flight request, from enqueue until its result is delivered."""
 
     __slots__ = (
         "request_id",
         "prompt",
         "max_tokens",
+        "stream",
         "future",
+        "token_queue",
         "enqueued_at",
         "enqueued_wall",
         "queue_depth_at_enqueue",
+        "first_token_at",
+        "completed_at",
+        "text_parts",
+        "tokens",
+        "done",
     )
 
     def __init__(
@@ -67,7 +97,8 @@ class Job:
         request_id: int,
         prompt: str,
         max_tokens: int,
-        future: "asyncio.Future",
+        stream: bool,
+        loop: "asyncio.AbstractEventLoop",
         enqueued_at: float,
         enqueued_wall: float,
         queue_depth_at_enqueue: int,
@@ -75,10 +106,21 @@ class Job:
         self.request_id = request_id
         self.prompt = prompt
         self.max_tokens = max_tokens
-        self.future = future
+        self.stream = stream
+        # Exactly one delivery channel per job. A Future for "give me the whole
+        # thing"; a queue of tokens for "give me each one as it exists".
+        self.future = None if stream else loop.create_future()
+        self.token_queue: Optional["asyncio.Queue"] = (
+            asyncio.Queue() if stream else None
+        )
         self.enqueued_at = enqueued_at
         self.enqueued_wall = enqueued_wall
         self.queue_depth_at_enqueue = queue_depth_at_enqueue
+        self.first_token_at: Optional[float] = None
+        self.completed_at: Optional[float] = None
+        self.text_parts: List[str] = []
+        self.tokens = 0
+        self.done = False
 
 
 class BatchingScheduler:
@@ -125,12 +167,26 @@ class BatchingScheduler:
         return self._queue.qsize()
 
     async def submit(self, prompt: str, max_tokens: int) -> Dict[str, Any]:
-        """Enqueue a request and wait for its batch to complete.
+        """Enqueue a request and wait for the complete response."""
+        job = self._enqueue(prompt, max_tokens, stream=False)
+        assert job.future is not None
+        return await job.future
 
-        Raises QueueFull if admission control refuses it. The check happens
-        BEFORE the job is created and enqueued, so a refused request costs the
-        server nothing but the comparison below — that speed is the point. A
-        rejection that takes as long as a real request is not backpressure.
+    def submit_stream(self, prompt: str, max_tokens: int) -> Job:
+        """Enqueue a request for streaming delivery. Returns the Job; the
+        caller drains job.token_queue until it yields a StreamDone."""
+        return self._enqueue(prompt, max_tokens, stream=True)
+
+    # -- admission ---------------------------------------------------------
+
+    def _enqueue(self, prompt: str, max_tokens: int, stream: bool) -> Job:
+        """Admission control, then enqueue.
+
+        Raises QueueFull if refused. The check happens BEFORE the job is
+        created, so a refused request costs the server one integer comparison
+        -- that speed is the point. A rejection that takes as long as a real
+        request is not backpressure. For a streaming request this also means
+        the refusal is a plain HTTP 503, never a half-open stream.
         """
         depth = self._queue.qsize()
         limit = self._settings.max_queue_depth
@@ -143,6 +199,7 @@ class BatchingScheduler:
                     "enqueued_at": time.time(),
                     "queue_depth_at_enqueue": depth,
                     "queue_depth_limit": limit,
+                    "stream": stream,
                     "backend": self._backend.name,
                 }
             )
@@ -152,12 +209,12 @@ class BatchingScheduler:
             self.peak_queue_depth = depth + 1
             telemetry.QUEUE_DEPTH_PEAK.set(self.peak_queue_depth)
 
-        loop = asyncio.get_running_loop()
         job = Job(
             request_id=next(self._ids),
             prompt=prompt,
             max_tokens=max_tokens,
-            future=loop.create_future(),
+            stream=stream,
+            loop=asyncio.get_running_loop(),
             enqueued_at=time.perf_counter(),
             enqueued_wall=time.time(),
             # Depth *before* this job joins, i.e. how many were already ahead.
@@ -166,7 +223,7 @@ class BatchingScheduler:
             queue_depth_at_enqueue=depth,
         )
         self._queue.put_nowait(job)
-        return await job.future
+        return job
 
     # -- scheduler loop ----------------------------------------------------
 
@@ -210,68 +267,182 @@ class BatchingScheduler:
 
         # A batch runs for a single max_tokens. Real batched generation steps
         # every sequence forward together and stops when the longest one is
-        # done, so the batch costs whatever its most demanding member costs.
+        # done, so the batch costs whatever its most demanding member costs. A
+        # member that asked for fewer tokens is marked done early and stops
+        # receiving; the batch keeps running for the others. That idle slot is
+        # the waste continuous batching exists to reclaim.
         max_tokens = max(job.max_tokens for job in batch)
         prompts = [job.prompt for job in batch]
 
         loop = asyncio.get_running_loop()
+
+        # The backend is a blocking generator on the inference thread. Each
+        # step has to cross to the event loop, and it does so exactly once per
+        # step -- not once per token per client -- via a thread-safe handoff
+        # onto this queue. Items are (timestamp, payload) so TTFT is measured
+        # from when the token existed, not from when the loop got around to it.
+        steps: "asyncio.Queue" = asyncio.Queue()
+        _END = object()
+
+        def drive() -> None:
+            try:
+                for step in self._backend.generate_batch_stream(prompts, max_tokens):
+                    loop.call_soon_threadsafe(
+                        steps.put_nowait, (time.perf_counter(), step)
+                    )
+            except Exception as exc:  # noqa: BLE001 - surfaced to every waiter
+                loop.call_soon_threadsafe(
+                    steps.put_nowait, (time.perf_counter(), exc)
+                )
+            finally:
+                loop.call_soon_threadsafe(
+                    steps.put_nowait, (time.perf_counter(), _END)
+                )
+
         started = time.perf_counter()
-        try:
-            texts = await loop.run_in_executor(
-                self._executor, self._backend.generate_batch, prompts, max_tokens
-            )
-            error: Optional[BaseException] = None
-        except Exception as exc:  # noqa: BLE001 - surfaced to every waiter
-            texts = []
-            error = exc
-        inference_ms = (time.perf_counter() - started) * 1000.0
+        drive_future = loop.run_in_executor(self._executor, drive)
+
+        error: Optional[BaseException] = None
+        while True:
+            ts, payload = await steps.get()
+            if payload is _END:
+                break
+            if isinstance(payload, BaseException):
+                error = payload
+                break
+            for index, job in enumerate(batch):
+                if job.done:
+                    continue
+                token = payload[index]
+                if token is None:
+                    continue
+                if job.first_token_at is None:
+                    job.first_token_at = ts
+                job.text_parts.append(token)
+                job.tokens += 1
+                if job.stream and job.token_queue is not None:
+                    job.token_queue.put_nowait(token)
+                if job.tokens >= job.max_tokens:
+                    # This job's response is complete even though the batch
+                    # may keep stepping for longer members. Deliver now; its
+                    # e2e ends here, not when the batch does.
+                    self._finish_job(job, batch, ts, dequeued_at, started)
+
+        await drive_future
+        inference_s = time.perf_counter() - started
 
         self.batches_dispatched += 1
         telemetry.BATCHES.inc()
         telemetry.BATCH_SIZE.observe(len(batch))
-        telemetry.INFERENCE.observe(inference_ms / 1000.0)
-        if error is None:
-            self.requests_served += len(batch)
-            telemetry.REQUESTS.labels(outcome="served").inc(len(batch))
+        telemetry.INFERENCE.observe(inference_s)
 
-        # Resolve the waiting clients FIRST, then log. Logging is not part of
-        # the latency any caller experiences.
         finished_at = time.perf_counter()
-        for index, job in enumerate(batch):
-            if job.future.done():
-                continue  # client disconnected and cancelled its wait
-            if error is not None:
-                job.future.set_exception(error)
-            else:
-                job.future.set_result(
-                    {
-                        "text": texts[index],
-                        "request_id": job.request_id,
-                        "batch_size": len(batch),
-                        "max_tokens": max_tokens,
-                        "queue_depth_at_enqueue": job.queue_depth_at_enqueue,
-                        "queue_wait_ms": (dequeued_at - job.enqueued_at) * 1000.0,
-                        "inference_ms": inference_ms,
-                        "e2e_ms": (finished_at - job.enqueued_at) * 1000.0,
-                    }
-                )
-
         for job in batch:
-            telemetry.QUEUE_WAIT.observe(dequeued_at - job.enqueued_at)
-            telemetry.E2E.observe(finished_at - job.enqueued_at)
-            self._metrics.log(
-                {
-                    "event": "served",
-                    "request_id": job.request_id,
-                    "enqueued_at": job.enqueued_wall,
-                    "dequeued_at": dequeued_wall,
-                    "queue_wait_ms": (dequeued_at - job.enqueued_at) * 1000.0,
-                    "batch_size": len(batch),
-                    "max_tokens": max_tokens,
-                    "inference_ms": inference_ms,
-                    "e2e_ms": (finished_at - job.enqueued_at) * 1000.0,
-                    "queue_depth_at_enqueue": job.queue_depth_at_enqueue,
-                    "backend": self._backend.name,
-                    "error": None if error is None else type(error).__name__,
-                }
-            )
+            if job.done:
+                continue
+            if error is not None:
+                self._fail_job(job, error)
+            else:
+                # Backend ended the sequence early (EOS) or the generator ran
+                # out of steps before this job hit its own max_tokens.
+                self._finish_job(job, batch, finished_at, dequeued_at, started)
+
+        # Log AFTER every client has been delivered to. Logging is not part of
+        # the latency any caller experiences.
+        for job in batch:
+            self._log_job(job, batch, dequeued_wall, dequeued_at, inference_s, error)
+
+    # -- delivery ----------------------------------------------------------
+
+    def _finish_job(
+        self,
+        job: Job,
+        batch: List[Job],
+        completed_at: float,
+        dequeued_at: float,
+        batch_started: float,
+    ) -> None:
+        job.done = True
+        job.completed_at = completed_at
+        self.requests_served += 1
+        telemetry.REQUESTS.labels(outcome="served").inc()
+        telemetry.TOKENS.inc(job.tokens)
+        if job.first_token_at is not None:
+            telemetry.TTFT.observe(job.first_token_at - job.enqueued_at)
+        telemetry.QUEUE_WAIT.observe(dequeued_at - job.enqueued_at)
+        telemetry.E2E.observe(completed_at - job.enqueued_at)
+
+        result = self._result_for(job, batch, dequeued_at, batch_started, completed_at)
+        if job.stream and job.token_queue is not None:
+            job.token_queue.put_nowait(StreamDone(result))
+        elif job.future is not None and not job.future.done():
+            job.future.set_result(result)
+
+    def _fail_job(self, job: Job, error: BaseException) -> None:
+        job.done = True
+        job.completed_at = time.perf_counter()
+        if job.stream and job.token_queue is not None:
+            job.token_queue.put_nowait(error)
+        elif job.future is not None and not job.future.done():
+            job.future.set_exception(error)
+
+    def _result_for(
+        self,
+        job: Job,
+        batch: List[Job],
+        dequeued_at: float,
+        batch_started: float,
+        completed_at: float,
+    ) -> Dict[str, Any]:
+        ttft_ms = (
+            (job.first_token_at - job.enqueued_at) * 1000.0
+            if job.first_token_at is not None
+            else None
+        )
+        return {
+            "text": "".join(job.text_parts),
+            "request_id": job.request_id,
+            "batch_size": len(batch),
+            "max_tokens": job.max_tokens,
+            "tokens": job.tokens,
+            "queue_depth_at_enqueue": job.queue_depth_at_enqueue,
+            "queue_wait_ms": (dequeued_at - job.enqueued_at) * 1000.0,
+            "ttft_ms": ttft_ms,
+            # Cost of the pass this job rode in, up to the point it finished.
+            "inference_ms": (completed_at - batch_started) * 1000.0,
+            "e2e_ms": (completed_at - job.enqueued_at) * 1000.0,
+        }
+
+    def _log_job(
+        self,
+        job: Job,
+        batch: List[Job],
+        dequeued_wall: float,
+        dequeued_at: float,
+        inference_s: float,
+        error: Optional[BaseException],
+    ) -> None:
+        completed = job.completed_at if job.completed_at is not None else time.perf_counter()
+        self._metrics.log(
+            {
+                "event": "served" if error is None else "failed",
+                "request_id": job.request_id,
+                "stream": job.stream,
+                "enqueued_at": job.enqueued_wall,
+                "dequeued_at": dequeued_wall,
+                "queue_wait_ms": (dequeued_at - job.enqueued_at) * 1000.0,
+                "ttft_ms": (
+                    (job.first_token_at - job.enqueued_at) * 1000.0
+                    if job.first_token_at is not None
+                    else None
+                ),
+                "batch_size": len(batch),
+                "max_tokens": job.max_tokens,
+                "tokens": job.tokens,
+                "inference_ms": inference_s * 1000.0,
+                "e2e_ms": (completed - job.enqueued_at) * 1000.0,
+                "queue_depth_at_enqueue": job.queue_depth_at_enqueue,
+                "backend": self._backend.name,
+                "error": None if error is None else type(error).__name__,
+            }
+        )

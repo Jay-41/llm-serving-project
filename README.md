@@ -560,6 +560,128 @@ p99 **22,480 ms**, peak depth **210** — reproducing the host result. The
 context; the venv alone is hundreds of MB and its binaries are built for the
 host, so copying it into a Linux image would be both slow and wrong.
 
+## Phase 3: token streaming (SSE)
+
+`POST /generate` with `"stream": true` returns `text/event-stream`: one `token`
+event per generated token, then a single `done` event carrying the same timing
+fields a non-streaming response would have returned.
+
+```bash
+curl -N -X POST https://llm-serving-demo.onrender.com/generate \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "hello", "max_tokens": 32, "stream": true}'
+```
+
+```
+event: token
+data: {"token": "the "}
+
+event: token
+data: {"token": "quick "}
+...
+event: done
+data: {"request_id": 7, "batch_size": 1, "tokens": 32, "ttft_ms": 61.2, "e2e_ms": 310.4, ...}
+```
+
+### Streaming and batching are not in tension
+
+The worry: batching runs 8 requests together and returns when all are done;
+streaming wants each token the instant it exists. How can you stream from a
+batch?
+
+Because that is not how a transformer generates. It runs a **decode loop** —
+one forward pass per token — and every pass advances *every* sequence in the
+batch by one token, in lockstep. Batching was always producing tokens
+incrementally; Phase 2 just collected them in a bucket and returned the bucket.
+Phase 3 hands each sequence its token after each step instead.
+
+So the backend became a generator yielding one step at a time. A non-streaming
+response is just every step concatenated. One code path through the model, two
+delivery modes, and both can share a batch.
+
+**Throughput is unchanged**, which is the first thing to verify:
+
+| Concurrency | Phase 2 rps | Phase 3, non-streaming | Phase 3, streaming |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.75 | 1.76 | 1.77 |
+| 8 | 9.22 | 9.37 | 9.39 |
+| 16 | 9.44 | 9.46 | 9.51 |
+
+Streaming changes *when* bytes arrive, not how much work the model does.
+
+### What streaming delivers: time to first token
+
+| Concurrency | TTFT p50 | Full response p50 | First output arrives |
+| ---: | ---: | ---: | ---: |
+| 1 | 61 ms | 566 ms | **9.4× sooner** |
+| 4 | 64 ms | 693 ms | **10.8× sooner** |
+| 8 | 61 ms | 851 ms | **14.0× sooner** |
+| 16 | 888 ms | 1,680 ms | 1.9× sooner |
+
+Under capacity, the first token lands in ~60ms — queue wait plus prefill —
+while the complete response takes 550–850ms. Measured client-side, tokens then
+arrive every **8.0ms**, exactly the modelled per-token cost. Without streaming
+the user stares at nothing for the full duration and gets everything at once.
+
+`ttft_ms` is reported on **every** response, streaming or not, because it is
+what streaming *would* have delivered. The gap between `ttft_ms` and `e2e_ms`
+is precisely the wait streaming removes from the user's experience.
+
+### The static-batching cost, measured
+
+At concurrency 16, TTFT jumps to 888ms. The distribution is bimodal:
+
+```
+    0-100 ms  ████████                          8 requests   mean  57ms
+  800-900 ms  ████████████████████████████████ 32 requests   mean 890ms
+```
+
+The first 8 got seats in the first batch. Every subsequent request had to wait
+for that batch to finish — **832ms, against a modelled batch duration of
+839ms** — before its own prefill could start. Batches here are *static*: once
+one starts, nobody joins until it ends.
+
+That is precisely what **continuous batching** (vLLM, TGI) removes: at every
+decode step, finished sequences leave and waiting ones join, so a new arrival
+waits ~one step (~13ms) rather than ~one batch (~830ms). It is out of scope
+here, but the cost is measured rather than hidden: it would turn the
+concurrency-16 TTFT from 890ms into roughly 70ms.
+
+### Implementation notes worth defending
+
+**SSE, not WebSockets.** The traffic is one-directional, plain HTTP works with
+`curl` and every proxy, browsers have `EventSource` built in, and there is no
+upgrade handshake. WebSockets would buy nothing and cost a protocol.
+
+**Admission control fires before the stream opens.** An overloaded server
+answers a streaming request with a plain 503 — never a 200 that opens a stream
+and then dies.
+
+**One thread hop per step, not per token per client.** The backend generator
+runs on the single inference thread; each step crosses to the event loop once
+via `call_soon_threadsafe`, and the scheduler fans it out to every job in the
+batch. Tokens are stamped with the time they *existed*, not the time the loop
+got around to them, so server-side TTFT is honest.
+
+**Members that finish early are delivered early.** A job asking for 16 tokens in
+a batch running 64 gets its `done` event at step 16 — its `e2e_ms` ends there,
+not when the batch does. Its slot then idles for 48 steps, which is the waste
+continuous batching reclaims.
+
+**The mock sleeps to absolute deadlines.** Splitting one 840ms sleep into 64
+small ones exposed `time.sleep()` overshoot: a couple of ms per call, compounding
+to **+20%** across a batch — enough to fail the regression check for a reason
+that has nothing to do with the design. Anchoring each step to the batch start
+time lets one step's overshoot be absorbed by the next; total lands within 1%.
+
+**Client disconnect does not free the slot.** The handler's generator is
+cancelled; the job keeps running in its batch (a static batch cannot evict a
+member) and its remaining tokens land on a queue nobody reads, bounded by
+`max_tokens`. Reclaiming that slot mid-batch is, again, continuous batching.
+
+Data: `bench/results/phase3_*`. Dashboard gains a *Time to first token* panel
+(TTFT p50/p95 against full-response p50) and *Token throughput* (tokens/s).
+
 ### A note on making the mock honest
 
 Both backends are blocking functions dispatched to a `ThreadPoolExecutor` with

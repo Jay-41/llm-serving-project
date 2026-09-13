@@ -99,6 +99,26 @@ E2E = Histogram(
              10.0, 20.0, 30.0),
 )
 
+# Time-to-first-token: enqueue until the first token EXISTED (the decode step
+# that produced it completed), measured server-side. Under light load this is
+# queue wait + prefill, roughly 50ms. Under heavy load it is dominated by
+# waiting for someone else's batch to finish -- the static-batching cost that
+# continuous batching removes. Fine buckets at the low end so that cost is
+# legible; the streaming/non-streaming difference lives between 10ms and 1s.
+TTFT = Histogram(
+    "llm_ttft_seconds",
+    "Enqueue until the request's first token was produced.",
+    buckets=(0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75,
+             1.0, 1.5, 2.0, 3.0, 5.0, 10.0),
+)
+
+# rate(llm_tokens_generated_total[30s]) is tokens/sec -- the throughput unit
+# that actually matters for a text generator, since requests vary in length.
+TOKENS = Counter(
+    "llm_tokens_generated_total",
+    "Tokens produced across all served requests.",
+)
+
 # Observed once per batch, not per request. Mean batch size is therefore
 # rate(llm_batch_size_sum[30s]) / rate(llm_batch_size_count[30s]).
 BATCH_SIZE = Histogram(

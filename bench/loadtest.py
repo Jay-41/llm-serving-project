@@ -41,10 +41,12 @@ def percentile(values: List[float], q: float) -> float:
 
 class Result:
     __slots__ = ("concurrency", "worker", "index", "status", "latency_ms",
-                 "wait_ms", "inference_ms", "batch_size")
+                 "wait_ms", "inference_ms", "batch_size", "ttft_client_ms",
+                 "ttft_server_ms")
 
     def __init__(self, concurrency, worker, index, status, latency_ms,
-                 wait_ms, inference_ms, batch_size):
+                 wait_ms, inference_ms, batch_size,
+                 ttft_client_ms=float("nan"), ttft_server_ms=float("nan")):
         self.concurrency = concurrency
         self.worker = worker
         self.index = index
@@ -53,6 +55,10 @@ class Result:
         self.wait_ms = wait_ms
         self.inference_ms = inference_ms
         self.batch_size = batch_size
+        # Client-side: first token event observed on the wire. Server-side:
+        # the ttft_ms the server reports. The gap between them is network.
+        self.ttft_client_ms = ttft_client_ms
+        self.ttft_server_ms = ttft_server_ms
 
 
 async def worker_loop(
@@ -73,26 +79,57 @@ async def worker_loop(
             return
 
         started = time.perf_counter()
+        wait_ms = inference_ms = batch_size = float("nan")
+        ttft_c = ttft_s = float("nan")
         try:
-            response = await client.post(url, json=payload)
+            if payload.get("stream"):
+                status, body, ttft_c = await _stream_once(client, url, payload, started)
+            else:
+                response = await client.post(url, json=payload)
+                status = response.status_code
+                body = response.json() if status == 200 else None
             latency_ms = (time.perf_counter() - started) * 1000.0
-            status = response.status_code
-            wait_ms = inference_ms = batch_size = float("nan")
-            if status == 200:
-                body = response.json()
+            if status == 200 and body:
                 wait_ms = body.get("queue_wait_ms", float("nan"))
                 inference_ms = body.get("inference_ms", float("nan"))
                 batch_size = body.get("batch_size", float("nan"))
+                t = body.get("ttft_ms")
+                ttft_s = float(t) if t is not None else float("nan")
         except Exception as exc:  # network error, timeout, refused connection
             latency_ms = (time.perf_counter() - started) * 1000.0
             status = f"error:{type(exc).__name__}"
-            wait_ms = inference_ms = batch_size = float("nan")
 
         results.append(
             Result(concurrency, worker_id, index, status, latency_ms,
-                   wait_ms, inference_ms, batch_size)
+                   wait_ms, inference_ms, batch_size, ttft_c, ttft_s)
         )
         index += 1
+
+
+async def _stream_once(client, url, payload, started):
+    """Consume one SSE response. Returns (status, done_payload, ttft_client_ms).
+
+    TTFT is stamped when the first `token` event's data line arrives on the
+    wire -- what a user would perceive -- not when the connection opens.
+    """
+    import json as _json
+
+    ttft = float("nan")
+    done = None
+    async with client.stream("POST", url, json=payload) as r:
+        if r.status_code != 200:
+            await r.aread()
+            return r.status_code, None, ttft
+        event = None
+        async for line in r.aiter_lines():
+            if line.startswith("event:"):
+                event = line[6:].strip()
+            elif line.startswith("data:"):
+                if event == "token" and ttft != ttft:  # first token, ttft is NaN
+                    ttft = (time.perf_counter() - started) * 1000.0
+                elif event == "done":
+                    done = _json.loads(line[5:])
+    return 200, done, ttft
 
 
 async def run_level(
@@ -128,6 +165,8 @@ async def run_level(
     waits = [r.wait_ms for r in ok if r.wait_ms == r.wait_ms]  # drop NaN
     infers = [r.inference_ms for r in ok if r.inference_ms == r.inference_ms]
     batches = [r.batch_size for r in ok if r.batch_size == r.batch_size]
+    ttft_c = [r.ttft_client_ms for r in ok if r.ttft_client_ms == r.ttft_client_ms]
+    ttft_s = [r.ttft_server_ms for r in ok if r.ttft_server_ms == r.ttft_server_ms]
 
     return {
         "concurrency": concurrency,
@@ -144,6 +183,10 @@ async def run_level(
         "mean_wait_ms": statistics.fmean(waits) if waits else float("nan"),
         "mean_inference_ms": statistics.fmean(infers) if infers else float("nan"),
         "mean_batch_size": statistics.fmean(batches) if batches else float("nan"),
+        "ttft_client_p50": percentile(ttft_c, 0.50),
+        "ttft_client_p95": percentile(ttft_c, 0.95),
+        "ttft_server_p50": percentile(ttft_s, 0.50),
+        "ttft_server_p95": percentile(ttft_s, 0.95),
         "_rows": results,
     }
 
@@ -153,7 +196,8 @@ def print_summary(summaries: List[Dict], label: str) -> None:
     print(f"=== {label} ===")
     header = (
         f"{'conc':>5} {'ok':>5} {'fail':>5} {'rps':>8} {'mean':>9} "
-        f"{'p50':>9} {'p95':>9} {'p99':>9} {'wait':>9} {'infer':>9} {'batch':>7}"
+        f"{'p50':>9} {'p95':>9} {'p99':>9} {'wait':>9} {'infer':>9} {'batch':>7} "
+        f"{'ttft50':>8} {'ttft95':>8}"
     )
     print(header)
     print("-" * len(header))
@@ -163,13 +207,15 @@ def print_summary(summaries: List[Dict], label: str) -> None:
             f"{s['throughput_rps']:>8.2f} {s['mean_ms']:>9.1f} "
             f"{s['p50_ms']:>9.1f} {s['p95_ms']:>9.1f} {s['p99_ms']:>9.1f} "
             f"{s['mean_wait_ms']:>9.1f} {s['mean_inference_ms']:>9.1f} "
-            f"{s['mean_batch_size']:>7.2f}"
+            f"{s['mean_batch_size']:>7.2f} "
+            f"{s['ttft_client_p50']:>8.1f} {s['ttft_client_p95']:>8.1f}"
         )
     print()
     print("rps = completed requests / wall clock. Latency columns are ms, "
           "measured client-side.")
     print("wait/infer are server-reported: queueing delay vs. time in the model.")
     print("batch = mean number of requests sharing a forward pass.")
+    print("ttft = time to first token, client-side; only measured with --stream.")
 
 
 def write_csv(path: str, summaries: List[Dict]) -> None:
@@ -181,14 +227,16 @@ def write_csv(path: str, summaries: List[Dict]) -> None:
         writer = csv.writer(handle)
         writer.writerow(
             ["concurrency", "worker", "index", "status", "latency_ms",
-             "wait_ms", "inference_ms", "batch_size"]
+             "wait_ms", "inference_ms", "batch_size",
+             "ttft_client_ms", "ttft_server_ms"]
         )
         for summary in summaries:
             for row in summary["_rows"]:
                 writer.writerow(
                     [row.concurrency, row.worker, row.index, row.status,
                      f"{row.latency_ms:.3f}", f"{row.wait_ms:.3f}",
-                     f"{row.inference_ms:.3f}", f"{row.batch_size:.2f}"]
+                     f"{row.inference_ms:.3f}", f"{row.batch_size:.2f}",
+                     f"{row.ttft_client_ms:.3f}", f"{row.ttft_server_ms:.3f}"]
                 )
 
     summary_path = path.replace(".csv", "_summary.csv")
@@ -197,7 +245,8 @@ def write_csv(path: str, summaries: List[Dict]) -> None:
         keys = ["concurrency", "requests", "ok", "failed", "wall_s",
                 "throughput_rps", "mean_ms", "p50_ms", "p95_ms", "p99_ms",
                 "max_ms", "mean_wait_ms", "mean_inference_ms",
-                "mean_batch_size"]
+                "mean_batch_size", "ttft_client_p50", "ttft_client_p95",
+                "ttft_server_p50", "ttft_server_p95"]
         writer.writerow(keys)
         for summary in summaries:
             writer.writerow([summary[k] for k in keys])
@@ -209,6 +258,8 @@ def write_csv(path: str, summaries: List[Dict]) -> None:
 async def main_async(args: argparse.Namespace) -> None:
     url = args.url.rstrip("/") + "/generate"
     payload = {"prompt": args.prompt, "max_tokens": args.max_tokens}
+    if args.stream:
+        payload["stream"] = True
     levels = [int(c) for c in args.concurrency.split(",") if c.strip()]
 
     # Warm up so the first level does not absorb connection setup and any
@@ -254,6 +305,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
+    parser.add_argument("--stream", action="store_true",
+                        help="Request SSE streaming and measure time to first token.")
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=120.0)
     parser.add_argument("--label", default="load test")

@@ -1,4 +1,4 @@
-"""HTTP surface: request queue + dynamic batching scheduler + admission control.
+"""HTTP surface: queue + dynamic batching + admission control + SSE streaming.
 
 The handler no longer runs inference. It hands the request to a queue and
 awaits a Future; one background scheduler task drains that queue, groups
@@ -13,18 +13,21 @@ Set MAX_BATCH_SIZE=1 to reproduce the Phase 1 baseline through this same code
 path, which is how the before/after comparison is kept honest.
 """
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app import telemetry
 from app.backends import build_backend
 from app.config import get_settings
 from app.metrics import MetricsLogger
-from app.scheduler import BatchingScheduler, QueueFull
+from app.scheduler import BatchingScheduler, Job, QueueFull, StreamDone
 from app.schemas import GenerateRequest, GenerateResponse, HealthResponse
 
 
@@ -159,7 +162,10 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
         )
 
     try:
-        result = await app.state.scheduler.submit(req.prompt, max_tokens)
+        if req.stream:
+            job = app.state.scheduler.submit_stream(req.prompt, max_tokens)
+        else:
+            result = await app.state.scheduler.submit(req.prompt, max_tokens)
     except QueueFull as exc:
         # 503, not 429. The deciding question is whose fault the rejection is.
         # 429 Too Many Requests means "you, the client, sent too much" — the
@@ -178,4 +184,50 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
             },
             headers={"Retry-After": str(settings.retry_after_s)},
         )
+
+    if req.stream:
+        # Admission already happened above, so an overloaded server answers
+        # with a plain 503 -- never a 200 that opens a stream and then dies.
+        return StreamingResponse(
+            _sse_events(job, app.state.backend.name),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                # Tell nginx-style proxies not to buffer, or "streaming" turns
+                # into "everything arrives at once at the end" behind them.
+                "X-Accel-Buffering": "no",
+            },
+        )
     return GenerateResponse(backend=app.state.backend.name, **result)
+
+
+def _sse_event(event: str, payload: dict) -> str:
+    """One Server-Sent Event: an `event:` line naming it, a `data:` line with
+    JSON, and the blank line that terminates it."""
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+async def _sse_events(job: Job, backend_name: str) -> AsyncIterator[str]:
+    """Drain a streaming job's token queue into SSE frames.
+
+    SSE rather than WebSockets because the traffic is one-directional, it is
+    plain HTTP (works with curl, survives every proxy, needs no upgrade
+    handshake), and browsers have EventSource built in. WebSockets would buy
+    nothing here and cost a protocol.
+
+    If the client disconnects, this generator is cancelled. The job keeps
+    running inside its batch -- a static batch cannot evict a member -- and
+    its remaining tokens land on a queue nobody reads, bounded by max_tokens
+    and collected with the Job. Reclaiming that slot mid-batch is continuous
+    batching, which is out of scope.
+    """
+    assert job.token_queue is not None
+    while True:
+        item = await job.token_queue.get()
+        if isinstance(item, StreamDone):
+            yield _sse_event("done", {"backend": backend_name, **item.result})
+            return
+        if isinstance(item, BaseException):
+            yield _sse_event("error", {"error": type(item).__name__})
+            return
+        yield _sse_event("token", {"token": item})
