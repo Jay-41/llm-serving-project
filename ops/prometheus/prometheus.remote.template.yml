@@ -1,0 +1,25 @@
+# Template for scraping a REMOTE app (the Phase 6 GPU pod) from the local
+# Prometheus. ops/scrape_remote.sh fills in __HOST__ and restarts Prometheus.
+#
+# 2s rather than 1s: every scrape is an HTTPS round trip through the
+# provider's proxy, and 1s would spend a meaningful fraction of the interval
+# in flight. Still far finer than a production default.
+
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+  external_labels:
+    project: llm-serving
+
+scrape_configs:
+  - job_name: llm-serving
+    metrics_path: /metrics
+    scheme: https
+    static_configs:
+      - targets: ["__HOST__"]
+        labels:
+          instance: gpu-pod
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

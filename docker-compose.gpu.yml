@@ -1,0 +1,9 @@
+# Override for Phase 6: the app runs on a remote GPU pod, so Prometheus scrapes
+# the generated remote config instead of app:8000. Applied by
+# ops/scrape_remote.sh; not meant to be used on its own.
+services:
+  prometheus:
+    volumes:
+      - ./ops/prometheus/prometheus.remote.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on: !reset []
