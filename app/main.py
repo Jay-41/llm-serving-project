@@ -51,8 +51,15 @@ async def lifespan(app: FastAPI):
     # Publish the config the dashboards draw limit lines from, and wire queue
     # depth to a callback so each scrape reads the live value rather than
     # whatever it was when it last changed.
-    telemetry.export_config(settings.max_batch_size, settings.max_queue_depth)
+    telemetry.export_config(
+        settings.max_batch_size, settings.max_queue_depth,
+        scheduler.admission_limit("free"),
+    )
     telemetry.QUEUE_DEPTH.set_function(lambda: scheduler.queue_depth)
+    telemetry.QUEUE_DEPTH_BY_TIER.labels(tier="paid").set_function(
+        lambda: scheduler.queue_depth_for("paid"))
+    telemetry.QUEUE_DEPTH_BY_TIER.labels(tier="free").set_function(
+        lambda: scheduler.queue_depth_for("free"))
 
     app.state.settings = settings
     app.state.backend = backend
@@ -114,8 +121,12 @@ async def index() -> dict:
             "max_batch_size": settings.max_batch_size,
             "max_wait_ms": settings.max_wait_ms,
             "max_queue_depth": settings.max_queue_depth,
-            "note": "requests beyond max_queue_depth are refused with 503 "
-                    "and a Retry-After header rather than queued",
+            "max_queue_depth_free": app.state.scheduler.admission_limit("free"),
+            "aging_ms": settings.aging_ms,
+            "note": "requests beyond the tier's queue depth limit are refused "
+                    "with 503 and a Retry-After header rather than queued; "
+                    "paid is served before free, and a free request that has "
+                    "waited aging_ms is promoted so it cannot starve",
         },
     }
 
@@ -132,8 +143,13 @@ async def healthz() -> HealthResponse:
         max_batch_size=settings.max_batch_size,
         max_wait_ms=settings.max_wait_ms,
         max_queue_depth=settings.max_queue_depth,
+        max_queue_depth_free=scheduler.admission_limit("free"),
+        aging_ms=settings.aging_ms,
         queue_depth=scheduler.queue_depth,
+        queue_depth_paid=scheduler.queue_depth_for("paid"),
+        queue_depth_free=scheduler.queue_depth_for("free"),
         peak_queue_depth=scheduler.peak_queue_depth,
+        aged_promotions=scheduler.aged_promotions,
         batches_dispatched=dispatched,
         requests_served=scheduler.requests_served,
         requests_rejected=scheduler.requests_rejected,
@@ -163,9 +179,9 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
 
     try:
         if req.stream:
-            job = app.state.scheduler.submit_stream(req.prompt, max_tokens)
+            job = app.state.scheduler.submit_stream(req.prompt, max_tokens, req.tier)
         else:
-            result = await app.state.scheduler.submit(req.prompt, max_tokens)
+            result = await app.state.scheduler.submit(req.prompt, max_tokens, req.tier)
     except QueueFull as exc:
         # 503, not 429. The deciding question is whose fault the rejection is.
         # 429 Too Many Requests means "you, the client, sent too much" — the
@@ -178,6 +194,7 @@ async def generate(req: GenerateRequest) -> GenerateResponse:
             status_code=503,
             detail={
                 "error": "server at capacity",
+                "tier": req.tier,
                 "queue_depth": exc.depth,
                 "queue_depth_limit": exc.limit,
                 "retry_after_s": settings.retry_after_s,

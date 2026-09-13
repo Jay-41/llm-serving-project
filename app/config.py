@@ -94,6 +94,23 @@ class Settings:
     # that has actually made progress.
     retry_after_s: int
 
+    # --- Priority tiers ---------------------------------------------------
+    # Admission threshold for free-tier requests. Paid uses max_queue_depth.
+    # Setting this lower than max_queue_depth is what makes backpressure
+    # business-aware: under overload the queue sits between the two limits,
+    # so free arrivals are refused while paid ones still get in. Set it equal
+    # to max_queue_depth (or 0, unbounded) to disable tiered admission.
+    max_queue_depth_free: int
+
+    # Priority ordering has a classic failure mode: if paid traffic never
+    # stops, a free request already in the queue never reaches the front --
+    # every new paid arrival jumps ahead of it. That is starvation. Aging is
+    # the standard fix: after waiting this long, a free request is treated as
+    # paid priority. Bounds free-tier wait at roughly aging_ms + one batch.
+    # 0 disables aging (strict priority), which is the control condition for
+    # the starvation experiment.
+    aging_ms: float
+
     # --- Metrics ----------------------------------------------------------
     metrics_path: str
 
@@ -118,6 +135,8 @@ def get_settings() -> Settings:
         max_wait_ms=_env_float("MAX_WAIT_MS", 10.0),
         max_queue_depth=_env_int("MAX_QUEUE_DEPTH", 16),
         retry_after_s=_env_int("RETRY_AFTER_S", 2),
+        max_queue_depth_free=_env_int("MAX_QUEUE_DEPTH_FREE", 8),
+        aging_ms=_env_float("AGING_MS", 2000.0),
         metrics_path=_env_str("METRICS_PATH", "logs/requests.jsonl"),
         model_name=_env_str("MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct"),
         model_device=_env_str("MODEL_DEVICE", "auto"),

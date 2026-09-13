@@ -151,6 +151,8 @@ All via environment variables (see `app/config.py`):
 | `MAX_WAIT_MS` | `10` | Batch dispatches when this elapses, whichever comes first |
 | `MAX_QUEUE_DEPTH` | `16` | Reject with 503 once this many are queued. `0` disables admission control |
 | `RETRY_AFTER_S` | `2` | Value of the `Retry-After` header on rejections |
+| `MAX_QUEUE_DEPTH_FREE` | `8` | Free-tier admission limit. Equal to `MAX_QUEUE_DEPTH` (or `0`) disables tiering |
+| `AGING_MS` | `2000` | Free request promoted to paid priority after waiting this long. `0` = strict priority |
 | `METRICS_PATH` | `logs/requests.jsonl` | Per-request JSONL sink |
 | `DEFAULT_MAX_TOKENS` | `64` | Used when a request omits `max_tokens` |
 | `MODEL_NAME` | `Qwen/Qwen2.5-1.5B-Instruct` | Phase 6 only |
@@ -681,6 +683,109 @@ member) and its remaining tokens land on a queue nobody reads, bounded by
 
 Data: `bench/results/phase3_*`. Dashboard gains a *Time to first token* panel
 (TTFT p50/p95 against full-response p50) and *Token throughput* (tokens/s).
+
+## Phase 5: priority tiers
+
+`POST /generate` accepts `"tier": "paid" | "free"` (default free). Two things
+change: paid requests are **served first**, and under overload free requests are
+**refused at a shallower queue depth** than paid. The tier is trusted as given —
+this demo has no auth; a real system would derive it from the caller's identity.
+
+```bash
+curl -X POST https://llm-serving-demo.onrender.com/generate \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "hello", "max_tokens": 32, "tier": "paid"}'
+```
+
+### Two knobs, deliberately separate
+
+| | What it decides | Setting |
+| --- | --- | --- |
+| **Tiered admission** | who gets *refused* under overload | `MAX_QUEUE_DEPTH_FREE=8`, `MAX_QUEUE_DEPTH=16` |
+| **Priority + aging** | who goes *first* among those admitted | `AGING_MS=2000` |
+
+Priority buys a better seat in line, not a faster oven. A paid request that lands
+in a batch with seven free ones still waits for that batch's full pass. The
+latency benefit to paid is real but bounded; the *admission* benefit — being the
+one who gets in when the queue is nearly full — is the larger effect.
+
+### Tiered admission: shed the right load
+
+Paid at 14 rps plus free at 4 rps against a ~9.4 rps system, 20 seconds:
+
+| | Flat limits (16/16) | Tiered (free 8 / paid 16) |
+| --- | ---: | ---: |
+| Paid accepted | 154 / 280 (**55%**) | 197 / 280 (**70%**) |
+| Free accepted | 48 / 80 (**60%**) | 5 / 80 (**6%**) |
+| **Total accepted** | **202** | **202** |
+
+Same goodput to the request — 202 either way — but the tiered version hands
+those slots to paid. Under overload the queue sits between the two limits, so
+free arrivals bounce while paid ones still get in: the depth from 8 to 16 is
+effectively reserved for paid. The flat control even shows free doing slightly
+*better* than paid (aging was promoting them), which is exactly the blind
+shedding the tiers exist to fix.
+
+### Starvation, and aging as the fix
+
+Strict priority has a textbook failure mode. If paid traffic never lets up, a
+free request already in the queue never reaches the front — every new paid
+arrival jumps ahead of it. This is the OS-scheduling starvation problem, and the
+standard fix is **aging**: after waiting `AGING_MS`, a free request is treated
+as paid priority.
+
+The experiment isolates queue ordering by giving both tiers the same admission
+limit (16), then offers paid at 10 rps (just over capacity) with free at 1 rps,
+for 30 seconds:
+
+| | Aging off (strict priority) | Aging on (2000 ms) |
+| --- | ---: | ---: |
+| Free queue wait p50 | **8,330 ms** | **2,349 ms** |
+| Free queue wait max | **9,741 ms** | **2,838 ms** |
+| Free p99 latency | 10,578 ms | 3,677 ms |
+| Free requests promoted | 0 | 25 of 28 |
+| Paid queue wait p50 | 500 ms | 1,116 ms |
+| Paid p99 latency | 1,879 ms | 2,429 ms |
+
+Free-tier wait by offer time, aging off:
+
+```
+   0-5 s   p50  8,330 ms
+   5-10 s  p50  9,369 ms
+  10-15 s  p50  9,503 ms      ← not coming down
+  15-20 s  p50  8,476 ms
+  20-25 s  p50  8,157 ms
+  25-30 s  p50  3,836 ms      ← only because paid load stopped
+```
+
+Aging on: flat at 2.2–2.5 s across every window.
+
+**The bound was predicted before it was measured.** A promoted request waits at
+most `AGING_MS` to be promoted, then at most one batch to be picked:
+2000 + 839 = **2,839 ms**. Measured free-tier max wait: **2,838 ms.**
+
+**The cost is real and reported.** Paid p50 wait doubled (500 → 1,116 ms). Each
+aged free request takes a batch slot from paid, and paid was already overloaded,
+so a starvation guarantee for free is paid for in paid-tier latency. That is the
+tradeoff, and the knob is `AGING_MS`: higher means less interference with paid
+and a longer worst case for free.
+
+### Implementation notes
+
+**A scanned list, not a heap.** `TieredQueue` keeps a plain list and finds the
+best job on every take. Admission control bounds it at 16, so the scan is
+trivial — and a heap could not do aging anyway. A heap orders by a key fixed at
+insertion; aging means a job's priority changes just by sitting there.
+Computing effective priority at take time is both simpler and the only correct
+option. Within a tier it is still FIFO.
+
+**Both label values materialised at startup**, as with `outcome` in Phase 4.1,
+so a tier with no traffic reports zero rather than absence.
+
+**Cardinality stays flat.** `tier` has exactly two values. Nothing per-client.
+
+Data: `bench/results/phase5_*`. Dashboard gains *Queue wait by tier* and
+*Admission by tier* (served/rejected per tier plus aged promotions).
 
 ### A note on making the mock honest
 

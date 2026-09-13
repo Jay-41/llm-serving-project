@@ -1,8 +1,10 @@
 """Request/response models for the serving API."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
+
+Tier = Literal["paid", "free"]
 
 
 class GenerateRequest(BaseModel):
@@ -11,6 +13,15 @@ class GenerateRequest(BaseModel):
         default=None,
         ge=1,
         description="Tokens to generate. Falls back to DEFAULT_MAX_TOKENS.",
+    )
+    tier: Tier = Field(
+        default="free",
+        description=(
+            "Scheduling priority. Paid requests are served first and are "
+            "admitted at a deeper queue than free ones. Trusted as given -- "
+            "this demo has no auth; a real system would derive it from the "
+            "caller's identity."
+        ),
     )
     stream: bool = Field(
         default=False,
@@ -26,6 +37,10 @@ class GenerateResponse(BaseModel):
     text: str
     backend: str
     request_id: int
+    tier: Tier
+    aged: bool = Field(
+        ..., description="True if a free request was promoted to paid priority by aging."
+    )
     max_tokens: int
     tokens: int = Field(..., description="Tokens actually generated.")
 
@@ -59,8 +74,13 @@ class HealthResponse(BaseModel):
 
     # 0 means admission control is off — an unbounded queue.
     max_queue_depth: int
+    max_queue_depth_free: int
+    aging_ms: float
     queue_depth: int
+    queue_depth_paid: int
+    queue_depth_free: int
     peak_queue_depth: int
+    aged_promotions: int
 
     batches_dispatched: int
     requests_served: int

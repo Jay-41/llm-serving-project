@@ -10,9 +10,9 @@ Prometheus cannot reconstruct the first from the second — histograms discard
 identity — and the JSONL cannot cheaply answer the second over a live window.
 Working rule #2 depends on the JSONL; the dashboards depend on this.
 
-Cardinality note: the only label used anywhere here is `outcome`, with two
-possible values. Nothing is labelled per-request, per-prompt or per-client —
-that is how a metrics endpoint turns into an outage.
+Cardinality note: the only labels used anywhere here are `outcome` (two
+values) and `tier` (two values). Nothing is labelled per-request, per-prompt
+or per-client — that is how a metrics endpoint turns into an outage.
 
 Single-process assumption: uvicorn runs one worker, so the default global
 registry is correct. Running multiple workers would need
@@ -27,8 +27,17 @@ from prometheus_client import Counter, Gauge, Histogram
 # rate(llm_requests_total{outcome="rejected"}[30s]) is shed load.
 REQUESTS = Counter(
     "llm_requests_total",
-    "Requests leaving the admission decision, by outcome.",
-    ["outcome"],
+    "Requests leaving the admission decision, by outcome and tier.",
+    ["outcome", "tier"],
+)
+
+# Free requests promoted to paid priority by aging. If this is zero under
+# mixed load, either aging is off or free requests are never waiting long
+# enough to need it. If it is high, the aging threshold may be doing all the
+# scheduling and the tiers are not really distinct.
+AGED = Counter(
+    "llm_aged_promotions_total",
+    "Free-tier requests promoted to paid priority after waiting aging_ms.",
 )
 
 BATCHES = Counter(
@@ -42,6 +51,17 @@ BATCHES = Counter(
 QUEUE_DEPTH = Gauge(
     "llm_queue_depth",
     "Requests currently waiting for a batch.",
+)
+
+QUEUE_DEPTH_BY_TIER = Gauge(
+    "llm_queue_depth_by_tier",
+    "Requests currently waiting for a batch, by tier.",
+    ["tier"],
+)
+
+QUEUE_DEPTH_LIMIT_FREE = Gauge(
+    "llm_queue_depth_limit_free",
+    "Admission threshold for free-tier requests. 0 means same as paid.",
 )
 
 # High-water mark. A 1s scrape interval will miss transient spikes; this will
@@ -73,6 +93,7 @@ MAX_BATCH_SIZE = Gauge(
 QUEUE_WAIT = Histogram(
     "llm_queue_wait_seconds",
     "Time from enqueue until a batch picked the request up.",
+    ["tier"],
     buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5,
              1.0, 2.0, 5.0, 10.0, 20.0, 30.0),
 )
@@ -95,6 +116,7 @@ INFERENCE = Histogram(
 E2E = Histogram(
     "llm_request_duration_seconds",
     "Enqueue until the response was ready.",
+    ["tier"],
     buckets=(0.5, 0.75, 1.0, 1.5, 2.0, 2.25, 2.5, 2.75, 3.0, 4.0, 5.0,
              10.0, 20.0, 30.0),
 )
@@ -128,7 +150,8 @@ BATCH_SIZE = Histogram(
 )
 
 
-def export_config(max_batch_size: int, max_queue_depth: int) -> None:
+def export_config(max_batch_size: int, max_queue_depth: int,
+                  max_queue_depth_free: int = 0) -> None:
     """Publish the settings the dashboards draw limit lines from, and
     materialise every label value at zero.
 
@@ -143,5 +166,10 @@ def export_config(max_batch_size: int, max_queue_depth: int) -> None:
     """
     MAX_BATCH_SIZE.set(max_batch_size)
     QUEUE_DEPTH_LIMIT.set(max_queue_depth)
-    REQUESTS.labels(outcome="served")
-    REQUESTS.labels(outcome="rejected")
+    QUEUE_DEPTH_LIMIT_FREE.set(max_queue_depth_free)
+    for tier in ("paid", "free"):
+        REQUESTS.labels(outcome="served", tier=tier)
+        REQUESTS.labels(outcome="rejected", tier=tier)
+        QUEUE_WAIT.labels(tier=tier)
+        E2E.labels(tier=tier)
+        QUEUE_DEPTH_BY_TIER.labels(tier=tier)

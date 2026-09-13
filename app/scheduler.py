@@ -25,6 +25,16 @@ buffer for a job that wants the whole response at once. Both kinds can share a
 batch. What streaming changes is when bytes reach the client, not how much
 work the model does; throughput is identical either way.
 
+Priority tiers (Phase 5): the queue is no longer FIFO. Paid requests are
+served before free ones, and free requests are refused at a shallower queue
+depth, so under overload the system sheds the load that matters least rather
+than whoever happened to arrive last. Strict priority has a textbook failure
+mode -- starvation, where a free request already in the queue never reaches
+the front because paid arrivals keep jumping ahead -- so a free request that
+has waited longer than aging_ms is promoted to paid priority. Priority buys a
+better seat in line; it does not buy a faster oven. A paid request that lands
+in a batch alongside seven free ones still waits for that batch's full pass.
+
 What it does NOT do is continuous batching. A batch is static: once it starts,
 nobody joins until it finishes, so a request arriving mid-batch waits for
 someone else's remaining steps before its own prefill. That wait shows up
@@ -72,6 +82,66 @@ class StreamDone:
         self.result = result
 
 
+class TieredQueue:
+    """Priority queue with aging, for a single consumer.
+
+    A plain list scanned on every take, not a heap. The queue is bounded by
+    admission control at max_queue_depth (16 by default), so the scan is
+    trivially cheap -- and a heap could not do aging anyway: a heap orders by a
+    key fixed at insertion, while aging means a job's priority changes just by
+    sitting there. Computing effective priority at take time is both simpler
+    and the only correct option.
+
+    Effective priority is (rank, enqueued_at): paid is rank 0, free is rank 1,
+    and a free job that has waited at least aging_s is treated as rank 0.
+    Ties break by arrival, so within a tier it is still FIFO.
+    """
+
+    def __init__(self, aging_s: float) -> None:
+        self._items: List["Job"] = []
+        self._aging_s = aging_s
+        # Set exactly when _items is non-empty; get() blocks on it. Only one
+        # consumer (the scheduler task), so no lost-wakeup races to reason
+        # about.
+        self._not_empty = asyncio.Event()
+
+    def qsize(self) -> int:
+        return len(self._items)
+
+    def count(self, tier: str) -> int:
+        return sum(1 for j in self._items if j.tier == tier)
+
+    def _rank(self, job: "Job", now: float) -> int:
+        if job.tier == "paid":
+            return 0
+        if self._aging_s > 0 and now - job.enqueued_at >= self._aging_s:
+            job.aged = True
+            return 0
+        return 1
+
+    def put_nowait(self, job: "Job") -> None:
+        self._items.append(job)
+        self._not_empty.set()
+
+    def get_nowait(self) -> "Job":
+        if not self._items:
+            raise asyncio.QueueEmpty
+        now = time.perf_counter()
+        best = min(
+            range(len(self._items)),
+            key=lambda i: (self._rank(self._items[i], now), self._items[i].enqueued_at),
+        )
+        job = self._items.pop(best)
+        if not self._items:
+            self._not_empty.clear()
+        return job
+
+    async def get(self) -> "Job":
+        while not self._items:
+            await self._not_empty.wait()
+        return self.get_nowait()
+
+
 class Job:
     """One in-flight request, from enqueue until its result is delivered."""
 
@@ -79,6 +149,8 @@ class Job:
         "request_id",
         "prompt",
         "max_tokens",
+        "tier",
+        "aged",
         "stream",
         "future",
         "token_queue",
@@ -97,6 +169,7 @@ class Job:
         request_id: int,
         prompt: str,
         max_tokens: int,
+        tier: str,
         stream: bool,
         loop: "asyncio.AbstractEventLoop",
         enqueued_at: float,
@@ -106,6 +179,8 @@ class Job:
         self.request_id = request_id
         self.prompt = prompt
         self.max_tokens = max_tokens
+        self.tier = tier
+        self.aged = False  # set by TieredQueue if aging promoted this job
         self.stream = stream
         # Exactly one delivery channel per job. A Future for "give me the whole
         # thing"; a queue of tokens for "give me each one as it exists".
@@ -136,7 +211,7 @@ class BatchingScheduler:
         self._executor = executor
         self._metrics = metrics
 
-        self._queue: "asyncio.Queue" = asyncio.Queue()
+        self._queue = TieredQueue(aging_s=settings.aging_ms / 1000.0)
         self._ids = itertools.count(1)
         self._task: Optional["asyncio.Task"] = None
 
@@ -146,6 +221,7 @@ class BatchingScheduler:
         self.requests_served = 0
         self.requests_rejected = 0
         self.peak_queue_depth = 0
+        self.aged_promotions = 0
 
     # -- public API --------------------------------------------------------
 
@@ -166,20 +242,40 @@ class BatchingScheduler:
     def queue_depth(self) -> int:
         return self._queue.qsize()
 
-    async def submit(self, prompt: str, max_tokens: int) -> Dict[str, Any]:
+    def queue_depth_for(self, tier: str) -> int:
+        return self._queue.count(tier)
+
+    async def submit(self, prompt: str, max_tokens: int, tier: str) -> Dict[str, Any]:
         """Enqueue a request and wait for the complete response."""
-        job = self._enqueue(prompt, max_tokens, stream=False)
+        job = self._enqueue(prompt, max_tokens, tier, stream=False)
         assert job.future is not None
         return await job.future
 
-    def submit_stream(self, prompt: str, max_tokens: int) -> Job:
+    def submit_stream(self, prompt: str, max_tokens: int, tier: str) -> Job:
         """Enqueue a request for streaming delivery. Returns the Job; the
         caller drains job.token_queue until it yields a StreamDone."""
-        return self._enqueue(prompt, max_tokens, stream=True)
+        return self._enqueue(prompt, max_tokens, tier, stream=True)
 
     # -- admission ---------------------------------------------------------
 
-    def _enqueue(self, prompt: str, max_tokens: int, stream: bool) -> Job:
+    def admission_limit(self, tier: str) -> int:
+        """Queue depth at which a request of this tier is refused. 0 = never.
+
+        Free uses the lower of the two limits so that setting
+        MAX_QUEUE_DEPTH_FREE above MAX_QUEUE_DEPTH cannot accidentally let
+        free requests in where paid ones would be refused.
+        """
+        paid = self._settings.max_queue_depth
+        if tier == "paid":
+            return paid
+        free = self._settings.max_queue_depth_free
+        if free <= 0:
+            return paid
+        if paid <= 0:
+            return free
+        return min(free, paid)
+
+    def _enqueue(self, prompt: str, max_tokens: int, tier: str, stream: bool) -> Job:
         """Admission control, then enqueue.
 
         Raises QueueFull if refused. The check happens BEFORE the job is
@@ -187,15 +283,20 @@ class BatchingScheduler:
         -- that speed is the point. A rejection that takes as long as a real
         request is not backpressure. For a streaming request this also means
         the refusal is a plain HTTP 503, never a half-open stream.
+
+        The threshold depends on tier. Under overload the queue sits between
+        the free and paid limits, so free arrivals bounce while paid ones
+        still get in: the system sheds the load that matters least.
         """
         depth = self._queue.qsize()
-        limit = self._settings.max_queue_depth
+        limit = self.admission_limit(tier)
         if limit > 0 and depth >= limit:
             self.requests_rejected += 1
-            telemetry.REQUESTS.labels(outcome="rejected").inc()
+            telemetry.REQUESTS.labels(outcome="rejected", tier=tier).inc()
             self._metrics.log(
                 {
                     "event": "rejected",
+                    "tier": tier,
                     "enqueued_at": time.time(),
                     "queue_depth_at_enqueue": depth,
                     "queue_depth_limit": limit,
@@ -213,6 +314,7 @@ class BatchingScheduler:
             request_id=next(self._ids),
             prompt=prompt,
             max_tokens=max_tokens,
+            tier=tier,
             stream=stream,
             loop=asyncio.get_running_loop(),
             enqueued_at=time.perf_counter(),
@@ -365,12 +467,15 @@ class BatchingScheduler:
         job.done = True
         job.completed_at = completed_at
         self.requests_served += 1
-        telemetry.REQUESTS.labels(outcome="served").inc()
+        if job.aged:
+            self.aged_promotions += 1
+            telemetry.AGED.inc()
+        telemetry.REQUESTS.labels(outcome="served", tier=job.tier).inc()
         telemetry.TOKENS.inc(job.tokens)
         if job.first_token_at is not None:
             telemetry.TTFT.observe(job.first_token_at - job.enqueued_at)
-        telemetry.QUEUE_WAIT.observe(dequeued_at - job.enqueued_at)
-        telemetry.E2E.observe(completed_at - job.enqueued_at)
+        telemetry.QUEUE_WAIT.labels(tier=job.tier).observe(dequeued_at - job.enqueued_at)
+        telemetry.E2E.labels(tier=job.tier).observe(completed_at - job.enqueued_at)
 
         result = self._result_for(job, batch, dequeued_at, batch_started, completed_at)
         if job.stream and job.token_queue is not None:
@@ -402,6 +507,8 @@ class BatchingScheduler:
         return {
             "text": "".join(job.text_parts),
             "request_id": job.request_id,
+            "tier": job.tier,
+            "aged": job.aged,
             "batch_size": len(batch),
             "max_tokens": job.max_tokens,
             "tokens": job.tokens,
@@ -427,6 +534,8 @@ class BatchingScheduler:
             {
                 "event": "served" if error is None else "failed",
                 "request_id": job.request_id,
+                "tier": job.tier,
+                "aged": job.aged,
                 "stream": job.stream,
                 "enqueued_at": job.enqueued_wall,
                 "dequeued_at": dequeued_wall,
