@@ -44,8 +44,14 @@ docker compose exec app tail -f /app/logs/requests.jsonl
 
 ## Live demo
 
-> **Status: not yet deployed.** `render.yaml` is ready; see *Deploying* below.
-> The URL lands here once it exists.
+**https://llm-serving-demo.onrender.com**
+
+```bash
+curl https://llm-serving-demo.onrender.com/healthz
+curl -X POST https://llm-serving-demo.onrender.com/generate \
+  -H 'content-type: application/json' -d '{"prompt": "hello", "max_tokens": 32}'
+curl https://llm-serving-demo.onrender.com/metrics
+```
 
 The deployed instance runs the **mock backend on CPU** — it demonstrates the
 queueing, batching and admission-control behaviour, not model quality. It is
@@ -83,6 +89,31 @@ reckless on a public URL. The public surface is `/generate`, `/healthz` and
 `MAX_ALLOWED_TOKENS` is 128 in `render.yaml` versus 512 locally: the endpoint is
 public and unauthenticated, and mock cost scales linearly with `max_tokens`, so
 this bounds what one caller can make the instance sleep for.
+
+### Verified against the live instance
+
+The Phase 4 overload test, run from a laptop against the public URL — 300
+requests at 20 rps for 15s:
+
+| | Local container | Live on Render |
+| --- | ---: | ---: |
+| Accepted / rejected | 204 / 196 | 153 / 147 |
+| Accepted p50 | 2,290 ms | 2,409 ms |
+| Accepted p99 | 2,519 ms | 2,717 ms |
+| Goodput | 9.21 rps | 9.13 rps |
+| Peak queue depth | 16 | 16 |
+| Rejection p50 | 3.9 ms | 94.6 ms |
+
+Accepted latency stayed flat across the run (2,350 → 2,428 → 2,425 ms by 5s
+window), so admission control holds from across the internet, not just on
+localhost. The ~100 ms gap in accepted latency and the 94 ms rejection cost are
+the same number: network round-trip to Oregon. The server still refuses in a
+few milliseconds; the client just has to cross the country to hear it.
+
+The mock cost model also survives the move to 0.1 CPU — a 32-token request
+reported `inference_ms: 301` against a predicted 40 + 8 × 32 = 296 — because
+`sleep()` does not care how much CPU it has. Data:
+`bench/results/phase43_render*.csv`.
 
 ## Local setup without Docker
 
