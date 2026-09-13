@@ -1,4 +1,4 @@
-"""Phase 2: request queue + dynamic batching scheduler.
+"""HTTP surface: request queue + dynamic batching scheduler + admission control.
 
 The handler no longer runs inference. It hands the request to a queue and
 awaits a Future; one background scheduler task drains that queue, groups
@@ -70,7 +70,51 @@ async def lifespan(app: FastAPI):
         metrics.close()
 
 
-app = FastAPI(title="LLM Serving Layer - Phase 2 batching", lifespan=lifespan)
+app = FastAPI(
+    title="LLM Serving Layer",
+    description=(
+        "Single-node LLM inference serving: request queueing, dynamic batching "
+        "and admission control. This instance runs a **mock backend** that "
+        "sleeps for a modelled amount of time instead of running a model, so "
+        "it demonstrates the scheduling behaviour rather than text quality. "
+        "Try `POST /generate` below, then watch `/metrics` change."
+    ),
+    version="0.4.3",
+    lifespan=lifespan,
+)
+
+
+@app.get("/", include_in_schema=False)
+async def index() -> dict:
+    """Landing page for humans who click the link. Points at the real
+    endpoints rather than greeting them with a 404."""
+    settings = app.state.settings
+    return {
+        "service": "llm-serving-layer",
+        "backend": app.state.backend.name,
+        "what_this_is": (
+            "A single-node LLM serving layer with request queueing, dynamic "
+            "batching and admission control. This instance uses a mock model "
+            "that sleeps instead of generating, so responses are placeholders "
+            "-- the point is the scheduling behaviour, visible in the timing "
+            "fields of every response."
+        ),
+        "try_it": "GET /docs for an interactive console",
+        "endpoints": {
+            "POST /generate": "submit a prompt; response carries queue_wait_ms, "
+                              "batch_size, inference_ms and e2e_ms",
+            "GET /healthz": "live scheduler counters",
+            "GET /metrics": "Prometheus exposition",
+            "GET /docs": "OpenAPI console",
+        },
+        "scheduler": {
+            "max_batch_size": settings.max_batch_size,
+            "max_wait_ms": settings.max_wait_ms,
+            "max_queue_depth": settings.max_queue_depth,
+            "note": "requests beyond max_queue_depth are refused with 503 "
+                    "and a Retry-After header rather than queued",
+        },
+    }
 
 
 @app.get("/healthz", response_model=HealthResponse)
