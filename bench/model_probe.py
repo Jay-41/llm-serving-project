@@ -108,6 +108,13 @@ def main() -> None:
     print(f"  batch-{n} throughput gain over batch-1: "
           f"{(n * a.tokens / big['total_ms']) / (a.tokens / base['total_ms']):.2f}x")
 
+    # One greppable line so bench/phase6_sweep.sh --auto can derive the
+    # admission threshold from the measured batch-8 time without a human
+    # reading the table.
+    b8 = next((r for r in rows if int(r["batch"]) == 8), big)
+    print(f"PROBE base_ms={base['prefill_ms']:.1f} per_token_ms={base['step_ms']:.2f} "
+          f"alpha={alpha_at_max:.4f} batch8_total_ms={b8['total_ms']:.0f} device={backend._device}")
+
 
 if __name__ == "__main__":
     main()

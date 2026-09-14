@@ -22,11 +22,13 @@ set -eu
 QUEUE_DEPTH=16
 TOKENS=64
 REQUESTS=40
+AUTO=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --queue-depth) QUEUE_DEPTH="$2"; shift 2 ;;
     --tokens)      TOKENS="$2"; shift 2 ;;
     --requests)    REQUESTS="$2"; shift 2 ;;
+    --auto)        AUTO=1; shift ;;
     *) echo "unknown arg $1"; exit 2 ;;
   esac
 done
@@ -35,6 +37,21 @@ OUT=bench/results
 mkdir -p "$OUT" logs
 export BACKEND=qwen MODEL_DEVICE=cuda MAX_ALLOWED_TOKENS=512
 PID=""
+
+if [ "$AUTO" = 1 ]; then
+  # Unattended mode, for use as the pod's container start command: calibrate,
+  # derive the admission threshold, run everything, ship results, then stay
+  # alive so logs remain readable and the meter is stopped deliberately.
+  echo "=== [0/5] calibration ==="
+  nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv 2>/dev/null || true
+  python -m bench.model_probe --sizes 1,2,4,8,16 --tokens $TOKENS --repeats 3 | tee $OUT/gpu_probe.txt
+  T8=$(grep '^PROBE ' $OUT/gpu_probe.txt | sed 's/.*batch8_total_ms=\([0-9]*\).*/\1/')
+  # depth = (target_p99 - own pass) * (batch / pass): backlog that fits in the
+  # latency budget once the request's own pass is subtracted. Same derivation
+  # as Phase 4, with this hardware's batch-8 time instead of the mock's 840ms.
+  QUEUE_DEPTH=$(awk -v t="$T8" 'BEGIN{ d=int((2500 - t) * 8 / t); if (d < 4) d = 4; if (d > 64) d = 64; print d }')
+  echo "batch-8 pass = ${T8}ms -> MAX_QUEUE_DEPTH derived as $QUEUE_DEPTH for a 2.5s p99 target"
+fi
 
 start() {
   # $@ are KEY=VALUE overrides for this experiment
@@ -112,5 +129,22 @@ python -m bench.tiers --paid $PAIDS --free 1 --duration 30 --max-tokens $TOKENS 
 stop
 
 echo
-echo "=== done. results in $OUT and logs/. bundle with: ==="
-echo "  tar czf /tmp/phase6.tgz $OUT/gpu_* logs/phase6_* && runpodctl send /tmp/phase6.tgz"
+echo "=== done. results in $OUT and logs/ ==="
+cp $OUT/gpu_probe.txt $OUT/gpu_batching_compare.txt logs/ 2>/dev/null || true
+
+if [ "$AUTO" = 1 ]; then
+  # Ship everything back. `runpodctl send` prints a one-time code on its first
+  # line and blocks until a receiver connects, so the code has to be visible in
+  # the pod logs -- print it loudly, then wait. Retry if nobody collected it.
+  mkdir -p /tmp/phase6 && cp $OUT/gpu_* logs/phase6_* /tmp/phase6/ 2>/dev/null || true
+  while true; do
+    echo "=== RESULTS READY: on your machine run  runpodctl receive <code>  with the code below ==="
+    runpodctl send /tmp/phase6 2>&1 | tee /tmp/send.log &
+    SEND=$!
+    sleep 3
+    echo "=== SEND CODE: $(head -1 /tmp/send.log | grep -oE '[0-9]+-[a-z-]+' || head -1 /tmp/send.log) ==="
+    wait $SEND && { echo "=== transfer complete; stop the pod ==="; break; }
+    echo "transfer did not complete; re-sending in 30s"; sleep 30
+  done
+  sleep infinity
+fi

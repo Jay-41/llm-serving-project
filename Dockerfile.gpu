@@ -46,6 +46,12 @@ RUN pip install -r requirements.txt
 COPY app/ ./app/
 COPY bench/ ./bench/
 
+# runpodctl for shipping results off the pod. Its send/receive is a one-time-
+# code peer transfer that needs no API key, so the pod can push results
+# without holding any credential.
+RUN curl -fsSL https://github.com/runpod/runpodctl/releases/download/v2.14.0/runpodctl-linux-amd64 \
+      -o /usr/local/bin/runpodctl && chmod +x /usr/local/bin/runpodctl
+
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /app/logs /app/hf /app/bench/results \
     && chown -R appuser:appuser /app

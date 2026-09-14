@@ -12,7 +12,26 @@ nothing is improvised while paying. Budget: ~1 hour of pod time, under $1.
 - [ ] Local compose stack is up: `docker compose up -d` (Prometheus + Grafana
       will be pointed at the pod once it has a URL).
 
-## Start the pod
+## Automated path (preferred) — driven from Claude Code via the RunPod MCP
+
+With the RunPod plugin connected, the whole session runs from the chat and
+nobody opens a web terminal:
+
+1. **Create the pod** via MCP with the settings in the table below, except the
+   start command is `sh bench/phase6_sweep.sh --auto`. The script calibrates,
+   derives the admission threshold itself, runs every experiment, then ships
+   results with `runpodctl send` and prints the one-time code in the pod logs.
+2. **Point Prometheus at it** as soon as the pod has a URL:
+   `ops/scrape_remote.sh <pod-id>-8000.proxy.runpod.net`
+3. **Watch the logs** via MCP until `=== SEND CODE: ... ===` appears (~25 min
+   including the model download).
+4. **Pull results:** `runpodctl receive <code>` on the Mac, then move
+   `gpu_*` into `bench/results/` and `phase6_*.jsonl` into `logs/`.
+5. **Screenshot Grafana**, then **delete the pod** via MCP. Confirm with a list.
+
+The manual path below does the same thing through the dashboard and a terminal.
+
+## Start the pod (manual path)
 
 RunPod → Pods → **Deploy** →
 
@@ -20,7 +39,7 @@ RunPod → Pods → **Deploy** →
 | --- | --- |
 | GPU | **L4** (24GB) or A10G — datacenter inference class |
 | Container image | `ghcr.io/jay-41/llm-serving-gpu:latest` |
-| Container start command | `sleep infinity` |
+| Container start command | `sh bench/phase6_sweep.sh --auto` (automated) or `sleep infinity` (manual) |
 | Expose HTTP ports | `8000` |
 | Container disk | 20 GB (image ~7GB + model ~3GB) |
 | Volume | none needed for a single session |
