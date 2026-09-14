@@ -17,16 +17,21 @@ nothing is improvised while paying. Budget: ~1 hour of pod time, under $1.
 With the RunPod plugin connected, the whole session runs from the chat and
 nobody opens a web terminal:
 
-1. **Create the pod** via MCP with the settings in the table below, except the
-   start command is `sh bench/phase6_sweep.sh --auto`. The script calibrates,
+1. **Create the pod** with the settings in the table below; the start command is
+   `sh bench/pod_entry.sh`, and ports are `8000/http,8001/http`. The entry script
+   runs the sweep in the background and serves `env.txt`, `sweep.log` and the
+   final `phase6.tgz` on 8001 — read them with
+   `curl https://<pod-id>-8001.proxy.runpod.net/sweep.log`.
+   Pass `--min-cuda-version 12.6` so the host driver supports the image's torch. The script calibrates,
    derives the admission threshold itself, runs every experiment, then ships
    results with `runpodctl send` and prints the one-time code in the pod logs.
 2. **Point Prometheus at it** as soon as the pod has a URL:
    `ops/scrape_remote.sh <pod-id>-8000.proxy.runpod.net`
-3. **Watch the logs** via MCP until `=== SEND CODE: ... ===` appears (~25 min
+3. **Watch `sweep.log`** on port 8001 until `=== RESULTS TARBALL` appears (~25 min
    including the model download).
-4. **Pull results:** `runpodctl receive <code>` on the Mac, then move
-   `gpu_*` into `bench/results/` and `phase6_*.jsonl` into `logs/`.
+4. **Pull results:** `curl -O https://<pod-id>-8001.proxy.runpod.net/phase6.tgz`,
+   then move `gpu_*` into `bench/results/` and `phase6_*.jsonl` into `logs/`.
+   (`runpodctl receive <code>` from the log is the fallback.)
 5. **Screenshot Grafana**, then **delete the pod** via MCP. Confirm with a list.
 
 The manual path below does the same thing through the dashboard and a terminal.
@@ -39,8 +44,8 @@ RunPod → Pods → **Deploy** →
 | --- | --- |
 | GPU | **L4** (24GB) or A10G — datacenter inference class |
 | Container image | `ghcr.io/jay-41/llm-serving-gpu:latest` |
-| Container start command | `sh bench/phase6_sweep.sh --auto` (automated) or `sleep infinity` (manual) |
-| Expose HTTP ports | `8000` |
+| Container start command | `sh bench/pod_entry.sh` (automated) or `sleep infinity` (manual) |
+| Expose HTTP ports | `8000,8001` |
 | Container disk | 20 GB (image ~7GB + model ~3GB) |
 | Volume | none needed for a single session |
 

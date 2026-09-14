@@ -136,7 +136,10 @@ if [ "$AUTO" = 1 ]; then
   # Ship everything back. `runpodctl send` prints a one-time code on its first
   # line and blocks until a receiver connects, so the code has to be visible in
   # the pod logs -- print it loudly, then wait. Retry if nobody collected it.
-  mkdir -p /tmp/phase6 && cp $OUT/gpu_* logs/phase6_* /tmp/phase6/ 2>/dev/null || true
+  mkdir -p /tmp/phase6 /tmp/pod && cp $OUT/gpu_* logs/phase6_* /tmp/phase6/ 2>/dev/null || true
+  # Primary retrieval: one tarball on the pod's HTTP port (bench/pod_entry.sh
+  # serves /tmp/pod). runpodctl send below is the fallback.
+  tar czf /tmp/pod/phase6.tgz -C /tmp phase6 && echo "=== RESULTS TARBALL: http://<pod>:8001/phase6.tgz ==="
   while true; do
     echo "=== RESULTS READY: on your machine run  runpodctl receive <code>  with the code below ==="
     runpodctl send /tmp/phase6 2>&1 | tee /tmp/send.log &

@@ -37,6 +37,13 @@ WORKDIR /app
 
 # torch first, on its own layer: it is the multi-GB dependency and changes
 # least. Everything else after it rebuilds cheaply.
+#
+# From PyTorch's cu126 index, NOT PyPI. The default PyPI wheel in 2026 is built
+# for CUDA 13 and needs a host driver most GPU hosts do not yet have; on an
+# older driver torch.cuda.is_available() is simply False, .to("cuda") throws,
+# and the pod crash-loops. cu126 matches the base image and runs on any driver
+# from 525 up. (Cost of learning this the hard way: one pod, ~$0.10.)
+RUN pip install torch --index-url https://download.pytorch.org/whl/cu126
 COPY requirements-model.txt ./
 RUN pip install -r requirements-model.txt
 
@@ -57,7 +64,10 @@ RUN useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app
 USER appuser
 
-EXPOSE 8000
+# 8000 is the API. 8001 serves the pod's own log and results over plain HTTP
+# (see bench/pod_entry.sh), so a benchmark session is observable through the
+# provider's port proxy even when its log API is not cooperating.
+EXPOSE 8000 8001
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=180s --retries=3 \
     CMD python -c "import os,urllib.request,sys; p=os.environ.get('PORT','8000'); sys.exit(0 if urllib.request.urlopen(f'http://127.0.0.1:{p}/healthz', timeout=3).status == 200 else 1)"
