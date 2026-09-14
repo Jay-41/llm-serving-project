@@ -28,8 +28,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     MODEL_DEVICE=cuda
 
 # Ubuntu 24.04 ships Python 3.12 -- same interpreter as the CPU image.
+#
+# gcc + python3-dev: transformers 5.x fetches Triton kernels (RMSNorm, ...)
+# from the HF Hub and Triton JIT-compiles a small driver shim against Python.h
+# on first use. Without a C compiler the very first forward pass dies with
+# "Failed to find C compiler". The runtime base image ships neither. (Cost of
+# learning this the hard way: one more pod, ~$0.05.)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv curl \
+    && apt-get install -y --no-install-recommends python3 python3-pip python3-venv python3-dev gcc curl \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3 /usr/local/bin/python
 

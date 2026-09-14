@@ -35,7 +35,9 @@ done
 
 OUT=bench/results
 mkdir -p "$OUT" logs
-export BACKEND=qwen MODEL_DEVICE=cuda MAX_ALLOWED_TOKENS=512
+# Overridable so the script's control flow can be dry-run on a laptop
+# (BACKEND=qwen MODEL_DEVICE=mps) before it runs on a metered GPU.
+export BACKEND="${BACKEND:-qwen}" MODEL_DEVICE="${MODEL_DEVICE:-cuda}" MAX_ALLOWED_TOKENS=512
 PID=""
 
 if [ "$AUTO" = 1 ]; then
@@ -44,8 +46,15 @@ if [ "$AUTO" = 1 ]; then
   # alive so logs remain readable and the meter is stopped deliberately.
   echo "=== [0/5] calibration ==="
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv 2>/dev/null || true
-  python -m bench.model_probe --sizes 1,2,4,8,16 --tokens $TOKENS --repeats 3 | tee $OUT/gpu_probe.txt
+  # No `| tee`: in POSIX sh a pipeline's status is tee's, not the probe's, and
+  # set -e would sail past a dead probe into load tests against a broken
+  # server. That is exactly what attempt 2 did.
+  if ! python -m bench.model_probe --sizes 1,2,4,8,16 --tokens $TOKENS --repeats 3 > $OUT/gpu_probe.txt 2>&1; then
+    echo "!!! calibration probe FAILED:"; tail -30 $OUT/gpu_probe.txt; exit 1
+  fi
+  cat $OUT/gpu_probe.txt
   T8=$(grep '^PROBE ' $OUT/gpu_probe.txt | sed 's/.*batch8_total_ms=\([0-9]*\).*/\1/')
+  if [ -z "$T8" ]; then echo "!!! no PROBE line in probe output; refusing to guess a queue depth"; exit 1; fi
   # depth = (target_p99 - own pass) * (batch / pass): backlog that fits in the
   # latency budget once the request's own pass is subtracted. Same derivation
   # as Phase 4, with this hardware's batch-8 time instead of the mock's 840ms.
@@ -63,7 +72,14 @@ start() {
     i=$((i+1)); [ $i -gt 240 ] && { echo "server failed to start"; exit 1; }
     sleep 1
   done
-  echo "--- server up ($*) ---"
+  # "Up" is not "working": attempt 2 had a healthy /healthz over a model
+  # whose every forward pass threw. One real request, or abort.
+  code=$(curl -s -o /tmp/smoke.json -w '%{http_code}' -m 120 -X POST localhost:8000/generate \
+           -H 'content-type: application/json' -d '{"prompt":"ok","max_tokens":4}')
+  if [ "$code" != "200" ]; then
+    echo "!!! server up but a real request returned HTTP $code:"; cat /tmp/smoke.json; echo; exit 1
+  fi
+  echo "--- server up and generating ($*) ---"
 }
 stop() {
   [ -n "$PID" ] && { kill "$PID" 2>/dev/null || true; wait "$PID" 2>/dev/null || true; PID=""; }
