@@ -9,7 +9,7 @@
     "backpressure"
   ],
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "editable": true,
   "refresh": "5s",
   "time": {
@@ -29,7 +29,33 @@
     "list": []
   },
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": {
+          "query": "label_values(llm_requests_total, instance)",
+          "refId": "instance"
+        },
+        "definition": "label_values(llm_requests_total, instance)",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": false,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "sort": 1,
+        "description": "compose = the local stack's app; gpu-pod = a Phase 6 benchmark pod. Both land in the same Prometheus, so pick one to avoid duplicate series."
+      }
+    ]
   },
   "panels": [
     {
@@ -50,7 +76,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(llm_requests_total{outcome=\"served\"}[30s]))",
+          "expr": "sum(rate(llm_requests_total{outcome=\"served\",instance=~\"$instance\"}[30s]))",
           "legendFormat": "served/s"
         }
       ],
@@ -107,7 +133,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "100 * sum(rate(llm_requests_total{outcome=\"rejected\"}[30s])) / clamp_min(sum(rate(llm_requests_total[30s])), 0.0001)",
+          "expr": "100 * sum(rate(llm_requests_total{outcome=\"rejected\",instance=~\"$instance\"}[30s])) / clamp_min(sum(rate(llm_requests_total{instance=~\"$instance\"}[30s])), 0.0001)",
           "legendFormat": "rejected %"
         }
       ],
@@ -166,7 +192,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.99, sum(rate(llm_request_duration_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(llm_request_duration_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "p99"
         }
       ],
@@ -227,7 +253,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(llm_batch_size_sum[30s])) / clamp_min(sum(rate(llm_batch_size_count[30s])), 0.0001)",
+          "expr": "sum(rate(llm_batch_size_sum{instance=~\"$instance\"}[30s])) / clamp_min(sum(rate(llm_batch_size_count{instance=~\"$instance\"}[30s])), 0.0001)",
           "legendFormat": "mean batch"
         }
       ],
@@ -285,12 +311,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(llm_requests_total{outcome=\"served\"}[15s]))",
+          "expr": "sum(rate(llm_requests_total{outcome=\"served\",instance=~\"$instance\"}[15s]))",
           "legendFormat": "served (goodput)"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(llm_requests_total{outcome=\"rejected\"}[15s]))",
+          "expr": "sum(rate(llm_requests_total{outcome=\"rejected\",instance=~\"$instance\"}[15s]))",
           "legendFormat": "rejected (503)"
         }
       ],
@@ -373,17 +399,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "llm_queue_depth",
+          "expr": "llm_queue_depth{instance=~\"$instance\"}",
           "legendFormat": "current depth"
         },
         {
           "refId": "B",
-          "expr": "llm_queue_depth_peak",
+          "expr": "llm_queue_depth_peak{instance=~\"$instance\"}",
           "legendFormat": "peak seen"
         },
         {
           "refId": "C",
-          "expr": "llm_queue_depth_limit > 0",
+          "expr": "llm_queue_depth_limit{instance=~\"$instance\"} > 0",
           "legendFormat": "admission limit"
         }
       ],
@@ -482,17 +508,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum(rate(llm_request_duration_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_request_duration_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "p50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum(rate(llm_request_duration_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(llm_request_duration_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "p95"
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum(rate(llm_request_duration_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(llm_request_duration_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "p99"
         }
       ],
@@ -543,12 +569,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum(rate(llm_queue_wait_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_queue_wait_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "queue wait p50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.50, sum(rate(llm_inference_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_inference_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "inference p50"
         }
       ],
@@ -633,12 +659,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(llm_batch_size_sum[15s])) / clamp_min(sum(rate(llm_batch_size_count[15s])), 0.0001)",
+          "expr": "sum(rate(llm_batch_size_sum{instance=~\"$instance\"}[15s])) / clamp_min(sum(rate(llm_batch_size_count{instance=~\"$instance\"}[15s])), 0.0001)",
           "legendFormat": "mean batch size"
         },
         {
           "refId": "B",
-          "expr": "llm_max_batch_size",
+          "expr": "llm_max_batch_size{instance=~\"$instance\"}",
           "legendFormat": "cap"
         }
       ],
@@ -734,17 +760,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(llm_requests_total{outcome=\"served\"})",
+          "expr": "sum(llm_requests_total{outcome=\"served\",instance=~\"$instance\"})",
           "legendFormat": "served total"
         },
         {
           "refId": "B",
-          "expr": "sum(llm_requests_total{outcome=\"rejected\"})",
+          "expr": "sum(llm_requests_total{outcome=\"rejected\",instance=~\"$instance\"})",
           "legendFormat": "rejected total"
         },
         {
           "refId": "C",
-          "expr": "sum(llm_batches_total)",
+          "expr": "sum(llm_batches_total{instance=~\"$instance\"})",
           "legendFormat": "forward passes"
         }
       ],
@@ -840,17 +866,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum(rate(llm_ttft_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_ttft_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "ttft p50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum(rate(llm_ttft_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(llm_ttft_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "ttft p95"
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.50, sum(rate(llm_request_duration_seconds_bucket[30s])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_request_duration_seconds_bucket{instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "full response p50"
         }
       ],
@@ -961,7 +987,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(llm_tokens_generated_total[15s]))",
+          "expr": "sum(rate(llm_tokens_generated_total{instance=~\"$instance\"}[15s]))",
           "legendFormat": "tokens/s"
         }
       ],
@@ -1028,17 +1054,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.50, sum(rate(llm_queue_wait_seconds_bucket{tier=\"paid\"}[30s])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_queue_wait_seconds_bucket{tier=\"paid\",instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "paid p50"
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.50, sum(rate(llm_queue_wait_seconds_bucket{tier=\"free\"}[30s])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(llm_queue_wait_seconds_bucket{tier=\"free\",instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "free p50"
         },
         {
           "refId": "C",
-          "expr": "histogram_quantile(0.99, sum(rate(llm_queue_wait_seconds_bucket{tier=\"free\"}[30s])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(llm_queue_wait_seconds_bucket{tier=\"free\",instance=~\"$instance\"}[30s])) by (le))",
           "legendFormat": "free p99"
         }
       ],
@@ -1135,27 +1161,27 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(llm_requests_total{outcome=\"served\",tier=\"paid\"}[15s]))",
+          "expr": "sum(rate(llm_requests_total{outcome=\"served\",tier=\"paid\",instance=~\"$instance\"}[15s]))",
           "legendFormat": "paid served"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(llm_requests_total{outcome=\"served\",tier=\"free\"}[15s]))",
+          "expr": "sum(rate(llm_requests_total{outcome=\"served\",tier=\"free\",instance=~\"$instance\"}[15s]))",
           "legendFormat": "free served"
         },
         {
           "refId": "C",
-          "expr": "sum(rate(llm_requests_total{outcome=\"rejected\",tier=\"paid\"}[15s]))",
+          "expr": "sum(rate(llm_requests_total{outcome=\"rejected\",tier=\"paid\",instance=~\"$instance\"}[15s]))",
           "legendFormat": "paid rejected"
         },
         {
           "refId": "D",
-          "expr": "sum(rate(llm_requests_total{outcome=\"rejected\",tier=\"free\"}[15s]))",
+          "expr": "sum(rate(llm_requests_total{outcome=\"rejected\",tier=\"free\",instance=~\"$instance\"}[15s]))",
           "legendFormat": "free rejected"
         },
         {
           "refId": "E",
-          "expr": "sum(rate(llm_aged_promotions_total[15s]))",
+          "expr": "sum(rate(llm_aged_promotions_total{instance=~\"$instance\"}[15s]))",
           "legendFormat": "aged promotions"
         }
       ],

@@ -86,14 +86,14 @@ Listed in **execution order**, which is deliberately not numeric order. Phases 4
 | :---- | :---- | :---- | :---- | :---- |
 | 1 | Baseline: single-request FastAPI endpoint, no batching | 1 week | **Core** | ✅ done |
 | 2 | Request queue \+ dynamic batching scheduler \+ basic logging (queue depth, batch size, latency) from day one, using the CPU mock | 1.5 weeks | **Core** | ✅ done |
-| 4 | Backpressure / admission control under simulated overload | 3–5 days | **Core** | ← next |
-| 4.1 | Prometheus instrumentation \+ Grafana dashboards — `/metrics` exposing queue depth, batch size, latency, throughput | 1 day | **Core** |  |
-| 4.2 | Dockerize — one Dockerfile, one docker-compose covering app \+ Prometheus \+ Grafana | 0.5 day | **Core** |  |
-| 4.3 | Deploy the CPU mock to a PaaS (Fly.io / Railway / Render) as a live public demo | 0.5 day | **Core** |  |
-| 3 | Token streaming (SSE) to the client | 3–5 days | **Core** |  |
-| 5 | Priority tiers (premium vs. free request scheduling) | 3–5 days | **Core** |  |
-| 6 | Swap in real model on GPU, rerun load tests, capture final benchmark numbers | 1 week | **Core** |  |
-| 7 | Writeup: README, design decisions, benchmark graphs, live demo link, dashboard screenshots | 2–3 days | **Core** |  |
+| 4 | Backpressure / admission control under simulated overload | 3–5 days | **Core** | ✅ done |
+| 4.1 | Prometheus instrumentation \+ Grafana dashboards — `/metrics` exposing queue depth, batch size, latency, throughput | 1 day | **Core** | ✅ done |
+| 4.2 | Dockerize — one Dockerfile, one docker-compose covering app \+ Prometheus \+ Grafana | 0.5 day | **Core** | ✅ done |
+| 4.3 | Deploy the CPU mock to a PaaS (Fly.io / Railway / Render) as a live public demo | 0.5 day | **Core** | ✅ done |
+| 3 | Token streaming (SSE) to the client | 3–5 days | **Core** | ✅ done |
+| 5 | Priority tiers (premium vs. free request scheduling) | 3–5 days | **Core** | ✅ done |
+| 6 | Swap in real model on GPU, rerun load tests, capture final benchmark numbers | 1 week | **Core** | ✅ done |
+| 7 | Writeup: README, design decisions, benchmark graphs, live demo link, dashboard screenshots | 2–3 days | **Core** | ✅ done |
 
 **Total: \~6.5–7.5 weeks** part-time (30.5–37.5 working days), accounting for class workload eating into available hours. Up from the original \~6–6.5 weeks: \+2 days for the three new items, and the range now assumes **nothing is cut**.
 
@@ -146,9 +146,10 @@ This is what lets you actually verify the batching improvement as you build it �
 3. A load-testing script/report showing before/after batching numbers  
 4. **A live, publicly reachable mock deployment** (CPU-only, single replica) that an interviewer can hit themselves  
 5. **A one-command local stack** — `docker compose up` brings up the app plus Prometheus and Grafana with dashboards preloaded  
-6. Resume bullet(s), to be filled in once real numbers exist, e.g.:  
-   - "Built an LLM inference serving layer with dynamic request batching and backpressure, improving throughput by **\[X\]x** over naive single-request serving while maintaining p95 latency under \*\*\[Y\]\*\*ms at **\[Z\]** concurrent requests"  
-   - "Implemented admission control to reject excess load under simulated traffic bursts, preventing latency collapse observed in the unprotected baseline"
+6. Resume bullets — **filled in with measured numbers (Phase 6, NVIDIA L4, Qwen2.5-1.5B-Instruct):**  
+   - "Built a single-node LLM inference serving layer (Python/FastAPI/asyncio, Hugging Face transformers) with dynamic request batching, improving throughput **7.5×** over one-at-a-time serving (1.2 → 9.0 req/s) and cutting p50 latency from **13.2 s to 1.8 s** at 16 concurrent clients, measured on an NVIDIA L4"  
+   - "Designed latency-budget-derived admission control that bounded p99 latency at **3.0 s under 2× sustained overload** (31 s unprotected) at a ~5% goodput cost; added SSE token streaming (**31 ms** time-to-first-token) and priority scheduling with aging that cut free-tier worst-case wait 2.5×"  
+   - "Instrumented with Prometheus/Grafana, containerized with Docker, deployed a live demo, and validated every result against a same-code control condition — total GPU spend under $0.50"
 
 ---
 
