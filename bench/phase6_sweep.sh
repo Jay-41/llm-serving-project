@@ -23,11 +23,13 @@ QUEUE_DEPTH=16
 TOKENS=64
 REQUESTS=40
 AUTO=0
+STAGES=1,2,3,4,5
 while [ $# -gt 0 ]; do
   case "$1" in
     --queue-depth) QUEUE_DEPTH="$2"; shift 2 ;;
     --tokens)      TOKENS="$2"; shift 2 ;;
     --requests)    REQUESTS="$2"; shift 2 ;;
+    --stages)      STAGES="$2"; shift 2 ;;
     --auto)        AUTO=1; shift ;;
     *) echo "unknown arg $1"; exit 2 ;;
   esac
@@ -86,41 +88,62 @@ stop() {
   sleep 1
 }
 trap stop EXIT
+want() { case ",$STAGES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 
+# Since Phase 5, requests default to tier=free and MAX_QUEUE_DEPTH_FREE
+# defaults to 8. Setting MAX_QUEUE_DEPTH=0 alone therefore does NOT disable
+# admission control -- the free limit silently stays at 8, and every "no
+# admission" condition becomes "admission at 8". Pod 3 ran the backpressure
+# OFF and ON conditions as the same experiment because of this. Single-tier
+# experiments must set BOTH limits, always.
+NOADMIT="MAX_QUEUE_DEPTH=0 MAX_QUEUE_DEPTH_FREE=0"
+
+if want 1; then
 echo "=== [1/5] batching sweep: MAX_BATCH_SIZE=8 vs 1 (Phase 2 on real hardware) ==="
-LABEL=batching;  start MAX_BATCH_SIZE=8 MAX_QUEUE_DEPTH=0
+LABEL=batching;  start MAX_BATCH_SIZE=8 $NOADMIT
 python -m bench.loadtest --concurrency 1,2,4,8,16 --requests $REQUESTS --max-tokens $TOKENS \
   --label "GPU batching" --out $OUT/gpu_batching.csv
 stop
-LABEL=nobatch;   start MAX_BATCH_SIZE=1 MAX_QUEUE_DEPTH=0
+LABEL=nobatch;   start MAX_BATCH_SIZE=1 $NOADMIT
 python -m bench.loadtest --concurrency 1,2,4,8,16 --requests $REQUESTS --max-tokens $TOKENS \
   --label "GPU no batching (control)" --out $OUT/gpu_nobatch.csv
 stop
 python -m bench.compare --before $OUT/gpu_nobatch_summary.csv --after $OUT/gpu_batching_summary.csv \
   --before-label "no batching" --after-label "batching" | tee $OUT/gpu_batching_compare.txt
+fi
 
 # Capacity = measured throughput at concurrency 16 with batching. Overload
-# tests offer ~2x that.
-CAP=$(awk -F, 'NR>1 && $1==16 {print $6}' $OUT/gpu_batching_summary.csv)
+# tests offer ~2x that. If stage 1 was skipped, fall back to the last run's
+# summary if present, else the probe's batch-8 rate.
+if [ -f $OUT/gpu_batching_summary.csv ]; then
+  CAP=$(awk -F, 'NR>1 && $1==16 {print $6}' $OUT/gpu_batching_summary.csv)
+else
+  CAP=$(awk -v t="${T8:-1118}" 'BEGIN{print 8000/t}')
+fi
 RATE=$(awk -v c="$CAP" 'BEGIN{printf "%.0f", c*2}')
 echo "measured capacity ${CAP} rps -> overload tests offer ${RATE} rps"
 
+if want 2; then
 echo "=== [2/5] streaming TTFT (Phase 3) ==="
-LABEL=stream;    start MAX_QUEUE_DEPTH=0
+LABEL=stream;    start $NOADMIT
 python -m bench.loadtest --stream --concurrency 1,4,8,16 --requests $REQUESTS --max-tokens $TOKENS \
   --label "GPU streaming" --out $OUT/gpu_stream.csv
 stop
+fi
 
+if want 3; then
 echo "=== [3/5] backpressure: admission OFF vs ON at depth $QUEUE_DEPTH (Phase 4) ==="
-LABEL=noadmit;   start MAX_QUEUE_DEPTH=0
+LABEL=noadmit;   start $NOADMIT
 python -m bench.burst --rate $RATE --duration 20 --bucket 4 --max-tokens $TOKENS \
   --label "GPU overload, admission OFF" --out $OUT/gpu_no_admission.csv
 stop
-LABEL=admit;     start MAX_QUEUE_DEPTH=$QUEUE_DEPTH
+LABEL=admit;     start MAX_QUEUE_DEPTH=$QUEUE_DEPTH MAX_QUEUE_DEPTH_FREE=$QUEUE_DEPTH
 python -m bench.burst --rate $RATE --duration 20 --bucket 4 --max-tokens $TOKENS \
   --label "GPU overload, admission ON ($QUEUE_DEPTH)" --out $OUT/gpu_admission.csv
 stop
+fi
 
+if want 4; then
 echo "=== [4/5] tiered admission (Phase 5) ==="
 PAID=$(awk -v c="$CAP" 'BEGIN{printf "%.0f", c*1.5}'); FREE=$(awk -v c="$CAP" 'BEGIN{printf "%.0f", c*0.4+1}')
 FREE_DEPTH=$((QUEUE_DEPTH / 2))
@@ -132,7 +155,9 @@ LABEL=tiers_tiered; start MAX_QUEUE_DEPTH=$QUEUE_DEPTH MAX_QUEUE_DEPTH_FREE=$FRE
 python -m bench.tiers --paid $PAID --free $FREE --duration 20 --max-tokens $TOKENS \
   --label "GPU tiers, tiered admission ($FREE_DEPTH/$QUEUE_DEPTH)" --out $OUT/gpu_tiers_tiered.csv
 stop
+fi
 
+if want 5; then
 echo "=== [5/5] starvation: aging OFF vs ON (Phase 5) ==="
 PAIDS=$(awk -v c="$CAP" 'BEGIN{printf "%.0f", c*1.05+0.5}')
 LABEL=aging_off; start MAX_QUEUE_DEPTH=$QUEUE_DEPTH MAX_QUEUE_DEPTH_FREE=$QUEUE_DEPTH AGING_MS=0
@@ -143,6 +168,7 @@ LABEL=aging_on;  start MAX_QUEUE_DEPTH=$QUEUE_DEPTH MAX_QUEUE_DEPTH_FREE=$QUEUE_
 python -m bench.tiers --paid $PAIDS --free 1 --duration 30 --max-tokens $TOKENS \
   --label "GPU starvation, aging ON" --out $OUT/gpu_aging_on.csv
 stop
+fi
 
 echo
 echo "=== done. results in $OUT and logs/ ==="

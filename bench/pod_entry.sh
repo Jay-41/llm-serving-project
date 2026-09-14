@@ -20,7 +20,8 @@ mkdir -p /tmp/pod
 } > /tmp/pod/env.txt 2>&1
 
 (
-  sh bench/phase6_sweep.sh --auto
+  # SWEEP_ARGS lets a pod run a subset, e.g. SWEEP_ARGS="--stages 1,2,3".
+  sh bench/phase6_sweep.sh --auto ${SWEEP_ARGS:-}
   echo "=== sweep exited with status $? at $(date -u +%FT%TZ) ==="
 ) > /tmp/pod/sweep.log 2>&1 &
 
