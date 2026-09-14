@@ -1,0 +1,23 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 5759.56it/s]
+loaded Qwen/Qwen2.5-1.5B-Instruct on cuda in 33.5s
+  batch=1  prefill=   19.4ms  step= 16.02ms  total=   1029ms  (    62 tok/s)
+  batch=2  prefill=   20.2ms  step= 16.73ms  total=   1074ms  (   119 tok/s)
+  batch=4  prefill=   22.0ms  step= 16.79ms  total=   1080ms  (   237 tok/s)
+  batch=8  prefill=   27.1ms  step= 16.87ms  total=   1090ms  (   470 tok/s)
+  batch=16 prefill=   46.0ms  step= 17.46ms  total=   1146ms  (   893 tok/s)
+
+batch  step ms  vs batch1  implied α   tok/s
+    1    16.02      1.00x        nan      62
+    2    16.73      1.04x      0.044     119
+    4    16.79      1.05x      0.016     237
+    8    16.87      1.05x      0.008     470
+   16    17.46      1.09x      0.006     893
+
+measured model, to compare with the mock's defaults:
+  MOCK_BASE_MS          19.4   (mock default 40)
+  MOCK_PER_TOKEN_MS    16.02   (mock default 8)
+  MOCK_BATCH_ALPHA     0.006   (mock default 0.08, from batch 16)
+
+  batch-16 throughput gain over batch-1: 14.37x
+PROBE base_ms=19.4 per_token_ms=16.02 alpha=0.0060 batch8_total_ms=1090 device=cuda

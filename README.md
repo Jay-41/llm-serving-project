@@ -143,15 +143,15 @@ All via environment variables (see `app/config.py`):
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `BACKEND` | `mock` | `mock` or `qwen` |
-| `MOCK_BASE_MS` | `40` | Modelled prefill cost |
-| `MOCK_PER_TOKEN_MS` | `8` | Modelled per-token decode cost |
+| `MOCK_BASE_MS` | `20` | Modelled prefill cost (L4-calibrated; was 40) |
+| `MOCK_PER_TOKEN_MS` | `16` | Modelled per-token decode cost (L4-calibrated; was 8) |
 | `MOCK_JITTER_MS` | `5` | +/- jitter on mock service time |
-| `MOCK_BATCH_ALPHA` | `0.08` | Marginal cost of each extra request in a batch |
+| `MOCK_BATCH_ALPHA` | `0.007` | Marginal cost of each extra request in a batch (L4-calibrated; was 0.08) |
 | `MAX_BATCH_SIZE` | `8` | Batch dispatches when this full. `1` disables batching |
 | `MAX_WAIT_MS` | `10` | Batch dispatches when this elapses, whichever comes first |
-| `MAX_QUEUE_DEPTH` | `16` | Reject with 503 once this many are queued. `0` disables admission control |
+| `MAX_QUEUE_DEPTH` | `10` | Reject with 503 once this many are queued. `0` disables admission control (was 16; re-derived for the L4) |
 | `RETRY_AFTER_S` | `2` | Value of the `Retry-After` header on rejections |
-| `MAX_QUEUE_DEPTH_FREE` | `8` | Free-tier admission limit. Equal to `MAX_QUEUE_DEPTH` (or `0`) disables tiering |
+| `MAX_QUEUE_DEPTH_FREE` | `5` | Free-tier admission limit. Equal to `MAX_QUEUE_DEPTH` (or `0`) disables tiering |
 | `AGING_MS` | `2000` | Free request promoted to paid priority after waiting this long. `0` = strict priority |
 | `METRICS_PATH` | `logs/requests.jsonl` | Per-request JSONL sink |
 | `DEFAULT_MAX_TOKENS` | `64` | Used when a request omits `max_tokens` |
@@ -786,6 +786,200 @@ so a tier with no traffic reports zero rather than absence.
 
 Data: `bench/results/phase5_*`. Dashboard gains *Queue wait by tier* and
 *Admission by tier* (served/rejected per tier plus aged promotions).
+
+## Phase 6: the real model on a real GPU
+
+Everything above was measured against a mock that sleeps. Phase 6 swapped in
+**Qwen2.5-1.5B-Instruct** on an **NVIDIA L4** (24 GB, RunPod secure cloud,
+$0.49/hr) and re-ran every experiment through the same HTTP path, each with
+its control condition. Total GPU spend for the project: **about $0.45**, across
+four pods — two of which crash-looped on environment bugs the Mac could not
+have revealed, documented below because the failures are half the lesson.
+
+> Phases 1–5 were measured with the mock's original guesses (`40ms` prefill,
+> `8ms`/token, `α=0.08`, queue depth 16). Those sections stand as recorded.
+> The mock's **defaults are now the L4-calibrated values** below.
+
+### Calibration: was the mock's cost model right?
+
+`bench/model_probe.py` drives the backend directly and splits each batched
+generation into prefill and per-step decode cost — the exact two-part shape
+the mock assumes.
+
+| | Mock guessed | Mac M5 Pro (MPS) | **NVIDIA L4** |
+| --- | ---: | ---: | ---: |
+| Prefill | 40 ms | 33 ms | **19.6 ms** |
+| Per token | 8 ms | 27 ms | **15.96 ms** |
+| **α** (batch efficiency) | 0.08 | 0.024 | **0.0073** |
+| Batch-8 cost vs batch-1 | 1.56× | 1.17× | **1.09×** |
+| Batch-16 cost vs batch-1 | 2.20× | — | **1.14×** |
+| Batch-16 throughput gain | 7.3× | — | **14.1×** |
+
+The raw per-step numbers on the L4:
+
+```
+batch=1   step=15.96ms   total=1025ms     62 tok/s
+batch=2   step=16.83ms   total=1081ms    118 tok/s
+batch=4   step=16.87ms   total=1084ms    236 tok/s
+batch=8   step=17.31ms   total=1118ms    458 tok/s
+batch=16  step=17.72ms   total=1164ms    880 tok/s
+```
+
+**The shape was right; the magnitude was conservative.** Sixteen sequences
+through the model cost 11% more per step than one. That is the memory-bandwidth
+argument in its purest form — the weights are read from HBM once per decode
+step no matter how many sequences share it, and the L4 barely notices the extra
+arithmetic. The mock's α was ten times too pessimistic, which means every Phase
+2–5 result was derived from a model that *understated* batching.
+
+Absolute per-token cost, 16ms, is the one number that came out higher than the
+guess. The L4's 300 GB/s bandwidth puts the floor for 3 GB of fp16 weights near
+10ms/token; the remaining 6ms is a Python decode loop with no CUDA graphs and
+no fused kernels — the gap vLLM closes.
+
+### Batching vs not — the résumé number
+
+Same code, `MAX_BATCH_SIZE=8` vs `MAX_BATCH_SIZE=1`, admission control fully
+disabled for both, 40 requests per level, 64 tokens each, zero rejections in
+either run:
+
+| Concurrency | No batching | Batching | **Gain** | p50 before | p50 after | p95 after |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.21 rps | 1.20 rps | 1.00× | 826 ms | 831 ms | 838 ms |
+| 2 | 1.19 | 2.21 | **1.85×** | 1,660 | 905 | 910 |
+| 4 | 1.20 | 4.42 | **3.67×** | 3,314 | 905 | 910 |
+| 8 | 1.21 | 8.97 | **7.44×** | 6,628 | 892 | 896 |
+| 16 | 1.21 | 9.02 | **7.47×** | 13,231 | 1,758 | 1,791 |
+
+**7.47× throughput at 16 concurrent, with p50 latency 7.5× lower** (13.2 s →
+1.76 s) and p95 under 1.8 s. The mock predicted 5.25×.
+
+At concurrency 8, batching delivers **7.44× the throughput at 13% of the
+latency** — every one of the eight requests gets its answer in 892 ms instead
+of waiting up to 6.6 s in line. The throughput plateau between 8 and 16 is
+`MAX_BATCH_SIZE=8`; the calibration says a cap of 16 would run near 14×.
+
+### Backpressure under real overload
+
+18 rps offered against a measured 9.0 rps capacity — 2× overload — for 20 s.
+`MAX_QUEUE_DEPTH` derived from the measured batch-8 pass for a 2.5 s p99
+target: `(2500 − 1090) × 8 / 1090 = 10`.
+
+| | Admission OFF | Admission ON (depth 10) |
+| --- | ---: | ---: |
+| Accepted / rejected | 360 / 0 | 149 / 211 |
+| **Accepted p50** | **16,399 ms** | **2,096 ms** |
+| **Accepted p99** | **30,955 ms** | **2,980 ms** |
+| Accepted max | 31,147 ms | 2,987 ms |
+| Rejection p50 | — | 2.7 ms |
+| **Peak queue depth** | **220** | **10** |
+| Wall clock to drain | 50.8 s | 22.1 s |
+| Goodput | 7.09 rps | 6.75 rps |
+
+Unprotected, the queue reached **220** and p99 hit **31 seconds**. Protected,
+p99 was **3 seconds** and the server said "no" to the excess in under 3 ms
+each. Goodput within 5%.
+
+Honest miss: the derived depth targeted 2.5 s p99 and delivered **2.98 s — 19%
+over**. On the mock the same derivation was within 2%. The formula ignores the
+batch already in flight when a request arrives, and real hardware varies more
+than a deterministic sleep. It still bounded latency at 3 s versus 31 s; a
+depth of 8 would have hit the target.
+
+### Streaming: time to first token on the L4
+
+| Concurrency | TTFT p50 | TTFT p95 | Full response p50 | First output |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | **31 ms** | 32 ms | 840 ms | **27× sooner** |
+| 4 | 36 ms | 39 ms | 911 ms | **26× sooner** |
+| 8 | 44 ms | 923 ms | 909 ms | 21× sooner (p50) |
+| 16 | 919 ms | 947 ms | 1,791 ms | 1.9× sooner |
+
+Under capacity, the first token lands in **31–44 ms** — prefill plus one decode
+step — while the full response takes ~900 ms. Over capacity, TTFT jumps by one
+batch duration, the static-batching cost measured in Phase 3, now on real
+hardware: ~890 ms, against a batch-8 pass of 1,090 ms.
+
+### A tuning insight the mock could not have produced
+
+Streaming at concurrency 8 reached only **6.34 rps** against **8.97 rps**
+non-streaming — batches were fragmenting. The reason is the p95 TTFT of 923 ms
+in the row above: some requests in every round waited for a batch.
+
+Eight closed-loop clients all finish at nearly the same moment and re-send. On
+the mock, "nearly" is microseconds, they all land inside the 10 ms batching
+window, and every batch is full. On real hardware with SSE, each client's
+stream flushes its last events a few milliseconds apart, the re-sends spread
+over more than 10 ms, and `MAX_WAIT_MS=10` dispatches a partial batch — the
+stragglers wait for the next one. Non-streaming responses all complete at the
+same instant, so they are unaffected.
+
+**`MAX_WAIT_MS` is not a fixed constant — it is a function of how spread out
+your arrivals are**, and a deterministic mock has zero spread. 25–50 ms is a
+better default on real hardware; the cost is that much added latency in the
+idle case, which is still less than one decode step.
+
+### Priority tiers on the L4
+
+Both experiments from Phase 5, re-run with the derived depth of 9 (pod 3's
+calibration) and the free limit at half that:
+
+| Tiered admission (paid 13 + free 5 rps) | Flat 9/9 | Tiered 4/9 |
+| --- | ---: | ---: |
+| Paid accepted | 42% | **50%** |
+| Free accepted | 38% | **18%** |
+| Total accepted | 147 | **147** |
+
+Same goodput to the request, shifted to paid — the same finding as the mock,
+smaller in magnitude because depth 9 leaves less room between the limits than
+16 did.
+
+| Starvation (paid ≈ capacity + free 1 rps) | Aging off | Aging on |
+| --- | ---: | ---: |
+| Free wait max | **5,514 ms** | **2,167 ms** |
+| Predicted bound (2000 + 1118) | — | 3,118 ms |
+
+Aging cut the free-tier worst case 2.5× and stayed under the bound.
+Starvation is milder here than on the mock because the queue is shallower: a
+shallow admission limit bounds starvation by itself, since a free request can
+only ever have nine paid ones ahead of it. The two mechanisms interact.
+
+### What went wrong, and what it cost
+
+Four pods. Two produced no results.
+
+**Pod 1 (~$0.10):** `pip install torch` in 2026 gives a CUDA 13 wheel. The
+host driver did not support it, `torch.cuda.is_available()` was False,
+`.to("cuda")` threw, and the container crash-looped every 40 s — invisibly,
+because the provider's log API returned 404 for the pod the entire time. Fix:
+install torch from PyTorch's `cu126` index. Lesson: **the Mac dry run cannot
+catch CUDA version skew**, because MPS never touches CUDA.
+
+**Pod 2 (~$0.05):** `transformers` 5.x fetches Triton kernels for RMSNorm from
+the Hub, and Triton JIT-compiles a driver shim on first use — which needs `gcc`
+and `Python.h`. The runtime-only base image has neither. The very first forward
+pass died with *Failed to find C compiler*. Fix: `apt-get install gcc
+python3-dev`. Also fixed: the sweep script sailed past the dead probe because
+`| tee` masked its exit status, derived a garbage queue depth of 64 from an
+empty value, and ran load tests against a server returning 500s. Now the probe
+writes to a file and aborts on failure, and every server start is followed by
+one real request that must return 200.
+
+**Pod 3 (~$0.15):** everything ran. But the backpressure OFF and ON runs came
+back identical — 215 rejections each, peak depth 8 each. Phase 5 had made
+requests default to `tier=free` with `MAX_QUEUE_DEPTH_FREE=8`, so
+`MAX_QUEUE_DEPTH=0` no longer meant "admission off"; the free limit silently
+stayed at 8. Calibration, tiers and aging from this pod are valid; batching,
+streaming and backpressure were re-run.
+
+**Pod 4 (~$0.15):** clean. Every "no admission" start now zeroes both limits.
+
+The pattern across all three: **an experiment that runs is not an experiment
+that measured what you meant.** A dry run that checked stages *ran* passed;
+one that checked the *numbers made sense* would have caught pod 3.
+
+Data: `bench/results/gpu_*`, `logs/phase6_*.jsonl`. Full session log with every
+raw table: `bench/results/gpu_sweep_stages_1-3.log`.
 
 ### A note on making the mock honest
 

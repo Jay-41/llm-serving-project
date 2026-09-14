@@ -1,0 +1,196 @@
+=== [0/5] calibration ===
+name, memory.total [MiB], driver_version
+NVIDIA L4, 23034 MiB, 595.91.07
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 5759.56it/s]
+loaded Qwen/Qwen2.5-1.5B-Instruct on cuda in 33.5s
+  batch=1  prefill=   19.4ms  step= 16.02ms  total=   1029ms  (    62 tok/s)
+  batch=2  prefill=   20.2ms  step= 16.73ms  total=   1074ms  (   119 tok/s)
+  batch=4  prefill=   22.0ms  step= 16.79ms  total=   1080ms  (   237 tok/s)
+  batch=8  prefill=   27.1ms  step= 16.87ms  total=   1090ms  (   470 tok/s)
+  batch=16 prefill=   46.0ms  step= 17.46ms  total=   1146ms  (   893 tok/s)
+
+batch  step ms  vs batch1  implied α   tok/s
+    1    16.02      1.00x        nan      62
+    2    16.73      1.04x      0.044     119
+    4    16.79      1.05x      0.016     237
+    8    16.87      1.05x      0.008     470
+   16    17.46      1.09x      0.006     893
+
+measured model, to compare with the mock's defaults:
+  MOCK_BASE_MS          19.4   (mock default 40)
+  MOCK_PER_TOKEN_MS    16.02   (mock default 8)
+  MOCK_BATCH_ALPHA     0.006   (mock default 0.08, from batch 16)
+
+  batch-16 throughput gain over batch-1: 14.37x
+PROBE base_ms=19.4 per_token_ms=16.02 alpha=0.0060 batch8_total_ms=1090 device=cuda
+batch-8 pass = 1090ms -> MAX_QUEUE_DEPTH derived as 10 for a 2.5s p99 target
+=== [1/5] batching sweep: MAX_BATCH_SIZE=8 vs 1 (Phase 2 on real hardware) ===
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 7643.89it/s]
+[startup] backend=qwen loaded in 5297ms | max_batch_size=8 max_wait_ms=10.0 | metrics=logs/phase6_batching.jsonl
+--- server up and generating (MAX_BATCH_SIZE=8 MAX_QUEUE_DEPTH=0 MAX_QUEUE_DEPTH_FREE=0) ---
+warmup: 2 request(s) done
+running concurrency=1 requests=40 ...
+running concurrency=2 requests=40 ...
+running concurrency=4 requests=40 ...
+running concurrency=8 requests=40 ...
+running concurrency=16 requests=40 ...
+
+=== GPU batching ===
+ conc    ok  fail      rps      mean       p50       p95       p99      wait     infer   batch   ttft50   ttft95
+----------------------------------------------------------------------------------------------------------------
+    1    40     0     1.20     831.1     830.6     837.9     838.9      10.0     818.3    1.00      nan      nan
+    2    40     0     2.21     905.9     905.2     909.9     915.5       9.9     890.8    2.00      nan      nan
+    4    40     0     4.42     904.9     905.4     910.3     910.7       9.6     888.1    4.00      nan      nan
+    8    40     0     8.97     891.1     891.5     895.5     898.7       2.6     874.6    8.00      nan      nan
+   16    40     0     9.02    1595.3    1757.8    1791.3    1792.3     695.5     877.9    8.00      nan      nan
+
+rps = completed requests / wall clock. Latency columns are ms, measured client-side.
+wait/infer are server-reported: queueing delay vs. time in the model.
+batch = mean number of requests sharing a forward pass.
+ttft = time to first token, client-side; only measured with --stream.
+wrote bench/results/gpu_batching.csv
+wrote bench/results/gpu_batching_summary.csv
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 10117.07it/s]
+[startup] backend=qwen loaded in 5211ms | max_batch_size=1 max_wait_ms=10.0 | metrics=logs/phase6_nobatch.jsonl
+--- server up and generating (MAX_BATCH_SIZE=1 MAX_QUEUE_DEPTH=0 MAX_QUEUE_DEPTH_FREE=0) ---
+warmup: 2 request(s) done
+running concurrency=1 requests=40 ...
+running concurrency=2 requests=40 ...
+running concurrency=4 requests=40 ...
+running concurrency=8 requests=40 ...
+running concurrency=16 requests=40 ...
+
+=== GPU no batching (control) ===
+ conc    ok  fail      rps      mean       p50       p95       p99      wait     infer   batch   ttft50   ttft95
+----------------------------------------------------------------------------------------------------------------
+    1    40     0     1.21     827.8     826.4     835.7     845.5       0.0     824.8    1.00      nan      nan
+    2    40     0     1.19    1658.2    1660.4    1741.5    1754.1     816.2     839.1    1.00      nan      nan
+    4    40     0     1.20    3195.0    3313.6    3348.7    3356.1    2361.9     829.8    1.00      nan      nan
+    8    40     0     1.21    6055.2    6628.2    6668.9    6670.9    5221.8     828.7    1.00      nan      nan
+   16    40     0     1.21   10760.7   13230.5   13249.1   13249.5    9921.8     826.7    1.00      nan      nan
+
+rps = completed requests / wall clock. Latency columns are ms, measured client-side.
+wait/infer are server-reported: queueing delay vs. time in the model.
+batch = mean number of requests sharing a forward pass.
+ttft = time to first token, client-side; only measured with --stream.
+wrote bench/results/gpu_nobatch.csv
+wrote bench/results/gpu_nobatch_summary.csv
+
+=== no batching -> batching ===
+ conc |    rps b    rps a    gain |     p50 b     p50 a    delta |     p95 b     p95 a    delta |  batch
+--------------------------------------------------------------------------------------------------------
+    1 |     1.21     1.20   1.00x |     826.4     830.6     +4.2 |     835.7     837.9     +2.2 |   1.00
+    2 |     1.19     2.21   1.85x |    1660.4     905.2   -755.2 |    1741.5     909.9   -831.7 |   2.00
+    4 |     1.20     4.42   3.67x |    3313.6     905.4  -2408.3 |    3348.7     910.3  -2438.4 |   4.00
+    8 |     1.21     8.97   7.44x |    6628.2     891.5  -5736.8 |    6668.9     895.5  -5773.4 |   8.00
+   16 |     1.21     9.02   7.47x |   13230.5    1757.8 -11472.7 |   13249.1    1791.3 -11457.8 |   8.00
+
+peak throughput gain: 7.47x (at concurrency 16)
+Latency deltas are ms; negative means faster.
+measured capacity 9.022940245749162 rps -> overload tests offer 18 rps
+=== [2/5] streaming TTFT (Phase 3) ===
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 8407.41it/s]
+[startup] backend=qwen loaded in 5193ms | max_batch_size=8 max_wait_ms=10.0 | metrics=logs/phase6_stream.jsonl
+--- server up and generating (MAX_QUEUE_DEPTH=0 MAX_QUEUE_DEPTH_FREE=0) ---
+warmup: 2 request(s) done
+running concurrency=1 requests=40 ...
+running concurrency=4 requests=40 ...
+running concurrency=8 requests=40 ...
+running concurrency=16 requests=40 ...
+
+=== GPU streaming ===
+ conc    ok  fail      rps      mean       p50       p95       p99      wait     infer   batch   ttft50   ttft95
+----------------------------------------------------------------------------------------------------------------
+    1    40     0     1.19     840.9     840.1     846.2     846.6      10.1     828.4    1.00     31.3     32.0
+    4    40     0     4.39     911.5     911.3     915.4     915.5       9.6     895.0    4.00     35.5     38.9
+    8    40     0     6.34    1125.4     909.1    1786.1    1795.9     223.3     890.2    6.80     43.5    922.9
+   16    40     0     8.86    1624.0    1790.5    1822.5    1823.6     705.4     894.7    8.00    918.5    947.2
+
+rps = completed requests / wall clock. Latency columns are ms, measured client-side.
+wait/infer are server-reported: queueing delay vs. time in the model.
+batch = mean number of requests sharing a forward pass.
+ttft = time to first token, client-side; only measured with --stream.
+wrote bench/results/gpu_stream.csv
+wrote bench/results/gpu_stream_summary.csv
+=== [3/5] backpressure: admission OFF vs ON at depth 10 (Phase 4) ===
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 10785.55it/s]
+[startup] backend=qwen loaded in 5229ms | max_batch_size=8 max_wait_ms=10.0 | metrics=logs/phase6_noadmit.jsonl
+--- server up and generating (MAX_QUEUE_DEPTH=0 MAX_QUEUE_DEPTH_FREE=0) ---
+server: max_batch_size=8 max_queue_depth=UNBOUNDED (off)
+offering 18.0 rps for 20.0s ...
+  offered 360 requests over 19.9s (18.0 rps), drained at 50.8s
+
+=== GPU overload, admission OFF ===
+  offered     360
+  accepted    360  (100.0%)
+  rejected      0  (HTTP 503)
+
+  offered rate           18.05 rps
+  wall clock              50.8 s   (until the last response landed)
+  goodput                 7.09 rps  (accepted / wall clock)
+  accepted p50           16399 ms
+  accepted p95           29676 ms
+  accepted p99           30955 ms
+  accepted max           31147 ms
+  peak queue depth         220
+
+  accepted latency by offer time (4s buckets):
+          window     n       p50       p95       max
+        0-4         72      4501      7194      7386
+        4-8         72     10448     13145     13339
+        8-12        72     16399     19091     19294
+       12-16        72     22342     25036     25228
+       16-20        72     28270     30958     31147
+
+  wrote bench/results/gpu_no_admission.csv
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 9364.08it/s]
+[startup] backend=qwen loaded in 5112ms | max_batch_size=8 max_wait_ms=10.0 | metrics=logs/phase6_admit.jsonl
+--- server up and generating (MAX_QUEUE_DEPTH=10 MAX_QUEUE_DEPTH_FREE=10) ---
+server: max_batch_size=8 max_queue_depth=10
+offering 18.0 rps for 20.0s ...
+  offered 360 requests over 19.9s (18.0 rps), drained at 22.1s
+
+=== GPU overload, admission ON (10) ===
+  offered     360
+  accepted    149  (41.4%)
+  rejected    211  (HTTP 503)
+
+  offered rate           18.05 rps
+  wall clock              22.1 s   (until the last response landed)
+  goodput                 6.75 rps  (accepted / wall clock)
+  accepted p50            2096 ms
+  accepted p95            2961 ms
+  accepted p99            2980 ms
+  accepted max            2987 ms
+  rejection p50            2.7 ms  <-- cost of a 'no'
+  rejection p99            3.6 ms
+  peak queue depth          10
+
+  accepted latency by offer time (4s buckets):
+          window     n       p50       p95       max
+        0-4         35      2078      2964      2969
+        4-8         29      2073      2959      2961
+        8-12        27      2113      2951      2956
+       12-16        32      2107      2980      2987
+       16-20        26      2123      2957      2974
+
+  wrote bench/results/gpu_admission.csv
+
+=== done. results in bench/results and logs/ ===
+=== RESULTS TARBALL: http://<pod>:8001/phase6.tgz ===
+=== RESULTS READY: on your machine run  runpodctl receive <code>  with the code below ===
+1324-xray-sonar-campus-9
+Zipping /tmp/phase6 to phase6.zip
+[2KAdding phase6/gpu_admission.csv[2KAdding phase6/gpu_batching.csv[2KAdding phase6/gpu_batching_compare.txt[2KAdding phase6/gpu_batching_summary.csv[2KAdding phase6/gpu_no_admission.csv[2KAdding phase6/gpu_nobatch.csv[2KAdding phase6/gpu_nobatch_summary.csv[2KAdding phase6/gpu_probe.txt[2KAdding phase6/gpu_stream.csv[2KAdding phase6/gpu_stream_summary.csv[2KAdding phase6/phase6_admit.jsonl[2KAdding phase6/phase6_batching.jsonl[2KAdding phase6/phase6_noadmit.jsonl[2KAdding phase6/phase6_nobatch.jsonl[2KAdding phase6/phase6_stream.jsonl
+                                 sending 0 files (521.3 kB)                                 sending 'phase6.zip' (521.3 kB)
+code is: 1324-xray-sonar-campus-9
+on the other computer run
+
+runpodctl receive 1324-xray-sonar-campus-9
+=== SEND CODE: 1324-xray-sonar-campus- ===

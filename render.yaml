@@ -45,9 +45,18 @@ services:
       - key: MAX_WAIT_MS
         value: "10"
       - key: MAX_QUEUE_DEPTH
+        value: "10"
+      - key: MAX_QUEUE_DEPTH_FREE
+        value: "5"
+      - key: AGING_MS
+        value: "2000"
+      # Mock cost model calibrated to an NVIDIA L4 in Phase 6.
+      - key: MOCK_BASE_MS
+        value: "20"
+      - key: MOCK_PER_TOKEN_MS
         value: "16"
       - key: MOCK_BATCH_ALPHA
-        value: "0.08"
+        value: "0.007"
       - key: DEFAULT_MAX_TOKENS
         value: "64"
 

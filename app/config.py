@@ -47,9 +47,16 @@ class Settings:
     # Decode on a GPU is memory-bandwidth bound at small batch sizes -- the
     # weights are read from HBM once per decode step regardless of how many
     # sequences share the step -- so batching is much cheaper than linear but
-    # not free. alpha=0.08 puts a batch of 8 at ~1.56x the cost of a batch of
-    # 1, i.e. ~5.1x the throughput. Recalibrate against measured Qwen numbers
-    # in Phase 6.
+    # not free.
+    #
+    # CALIBRATED IN PHASE 6. The defaults for base_ms, per_token_ms and alpha
+    # are now the values measured on an NVIDIA L4 with Qwen2.5-1.5B-Instruct
+    # (bench/results/gpu_probe.txt): prefill 19.6ms, 15.96ms/token, and
+    # alpha = 0.0073 -- a batch of 16 costs 14% more per step than a batch of
+    # 1. Phases 1-5 were measured with the pre-calibration guesses (40 / 8 /
+    # 0.08, MAX_QUEUE_DEPTH 16); those results stand as recorded in the README
+    # and are reproducible by setting the old values explicitly. The guess for
+    # alpha was ten times too pessimistic.
     mock_batch_alpha: float
 
     # --- Scheduler --------------------------------------------------------
@@ -86,7 +93,11 @@ class Settings:
     # into a rejection while leaving capacity idle. This knob is the dial
     # between those two failure modes.
     #
-    # Re-derive it in Phase 6: batch_time changes on real hardware.
+    # Re-derived in Phase 6 against the L4: batch-8 pass measured at ~1090ms,
+    # so (2500 - 1090) * 8 / 1090 = 10. Measured p99 under 2x overload with
+    # depth 10 came in at 2.98s against the 2.5s target -- 19% over. The
+    # derivation is an approximation that ignores the batch already in
+    # flight; real hardware also varies more than a deterministic sleep.
     max_queue_depth: int
 
     # Advertised on rejections via the Retry-After header. Roughly the time to
@@ -127,15 +138,15 @@ class Settings:
 def get_settings() -> Settings:
     return Settings(
         backend=_env_str("BACKEND", "mock").strip().lower(),
-        mock_base_ms=_env_float("MOCK_BASE_MS", 40.0),
-        mock_per_token_ms=_env_float("MOCK_PER_TOKEN_MS", 8.0),
+        mock_base_ms=_env_float("MOCK_BASE_MS", 20.0),
+        mock_per_token_ms=_env_float("MOCK_PER_TOKEN_MS", 16.0),
         mock_jitter_ms=_env_float("MOCK_JITTER_MS", 5.0),
-        mock_batch_alpha=_env_float("MOCK_BATCH_ALPHA", 0.08),
+        mock_batch_alpha=_env_float("MOCK_BATCH_ALPHA", 0.007),
         max_batch_size=_env_int("MAX_BATCH_SIZE", 8),
         max_wait_ms=_env_float("MAX_WAIT_MS", 10.0),
-        max_queue_depth=_env_int("MAX_QUEUE_DEPTH", 16),
+        max_queue_depth=_env_int("MAX_QUEUE_DEPTH", 10),
         retry_after_s=_env_int("RETRY_AFTER_S", 2),
-        max_queue_depth_free=_env_int("MAX_QUEUE_DEPTH_FREE", 8),
+        max_queue_depth_free=_env_int("MAX_QUEUE_DEPTH_FREE", 5),
         aging_ms=_env_float("AGING_MS", 2000.0),
         metrics_path=_env_str("METRICS_PATH", "logs/requests.jsonl"),
         model_name=_env_str("MODEL_NAME", "Qwen/Qwen2.5-1.5B-Instruct"),
